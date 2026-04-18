@@ -19,9 +19,10 @@ model:
   ensemble:
     enabled: true
     weights:
-      rsm: 0.25        # Multivariate Markov-switching model
-      probit: 0.50      # Probit model (supervised, highest weight)
-      cfnai: 0.25       # CFNAI threshold signal
+      rsm: 0.20        # Multivariate Markov-switching model
+      probit: 0.40      # Probit model (supervised, highest weight)
+      cfnai: 0.20       # CFNAI threshold signal
+      sahm: 0.20        # Sahm rule (unemployment-based, highly reliable)
     probit:
       add_lags: 1
       regularization: 0.01
