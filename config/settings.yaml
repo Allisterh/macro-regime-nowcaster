@@ -1,9 +1,12 @@
 model:
   n_factors: 4
   n_regimes: 2
+  # Order matters and is validated at construction: regimes are sorted by
+  # ascending mean, so the lowest-mean (recession) state must come first.
+  # The reverse order silently inverts the recession probability.
   regime_labels:
-    - expansion
     - recession
+    - expansion
   factor_names:
     - real_activity
     - labor_market
@@ -24,11 +27,13 @@ model:
       cfnai: 0.20       # CFNAI threshold signal
       sahm: 0.20        # Sahm rule (unemployment-based, highly reliable)
     probit:
-      add_lags: 1
-      regularization: 0.01
+      add_lags: 3
+      regularization: 1.0
+      class_balanced: true
       extra_features:
         - CFNAI
         - T10Y2Y
+        - BAA10Y
 
 allocation:
   regime_conditional_weights:

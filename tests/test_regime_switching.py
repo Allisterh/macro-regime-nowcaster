@@ -12,7 +12,6 @@ import pytest
 
 from src.models.regime_switching import RegimeSwitchingModel, _gaussian_density
 
-
 # ---------------------------------------------------------------------------
 # RegimeSwitchingModel tests
 # ---------------------------------------------------------------------------

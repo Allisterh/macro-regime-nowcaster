@@ -26,10 +26,9 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from loguru import logger
 
@@ -162,8 +161,8 @@ def _run_nowcast(start: str, end: str, n_fac: int):
         return None, "FRED_API_KEY not set — add it to your .env file."
 
     try:
-        from src.data.fred_client import FREDClient
         from src.data.data_pipeline import DataPipeline
+        from src.data.fred_client import FREDClient
         from src.models.nowcaster import Nowcaster
 
         client = FREDClient(api_key=api_key)

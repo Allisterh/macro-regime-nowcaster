@@ -1,0 +1,54 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  fast:
+    name: fast suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check src/ tests/ scripts/
+
+      # Excludes the tests that repeatedly refit the DFM/RSM; those run in
+      # the `slow` job so a broken commit is caught in ~2 minutes rather
+      # than ~25.
+      - name: Test
+        run: pytest tests/ -m "not slow" -q --cov=src --cov-report=term-missing
+
+  slow:
+    name: model-refitting suite
+    runs-on: ubuntu-latest
+    # Only gate merges on this; it is too slow for every push to a branch.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # These are the leakage and recovery guarantees: prefix-invariance
+      # of model outputs, signal unit contracts, regime orientation, and
+      # DFM factor recovery.
+      - name: Test
+        run: pytest tests/ -m "slow" -q
+        timeout-minutes: 45

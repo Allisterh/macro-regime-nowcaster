@@ -1,4 +1,4 @@
-.PHONY: install install-dev test lint format fetch-data train nowcast dashboard clean
+.PHONY: install install-dev test test-all features verify-features lint format fetch-data train nowcast dashboard clean
 
 # Install production dependencies
 install:
@@ -9,9 +9,21 @@ install-dev:
 	pip install -e ".[dev]"
 	pre-commit install
 
-# Run tests
+# Run the fast suite (excludes repeated model refits)
 test:
+	pytest tests/ -m "not slow" -v --cov=src --cov-report=term-missing
+
+# Run everything, including the slow model-refitting tests
+test-all:
 	pytest tests/ -v --cov=src --cov-report=term-missing
+
+# Generate a point-in-time feature panel for downstream models
+features:
+	python scripts/build_features.py
+
+# Verify the feature panel is point-in-time (no future data in history)
+verify-features:
+	python scripts/build_features.py --verify
 
 # Lint code
 lint:

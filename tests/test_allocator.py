@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 import pytest
 
+from src.allocation.backtester import Backtester, BacktestResult, _average_turnover, _max_drawdown
 from src.allocation.regime_allocator import RegimeAllocator
-from src.allocation.backtester import Backtester, BacktestResult, _max_drawdown, _average_turnover
 
 try:
     from src.models.nowcaster import NowcastResult

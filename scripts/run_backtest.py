@@ -57,8 +57,8 @@ def main() -> None:
         logger.error("FRED_API_KEY not set.  Add it to .env or environment.")
         sys.exit(1)
 
-    from src.data.fred_client import FREDClient
     from src.data.data_pipeline import DataPipeline
+    from src.data.fred_client import FREDClient
     from src.models.regime_backtest import RegimeBacktester, cfnai_baseline_backtest
 
     logger.info("Initialising FRED client and data pipeline...")
@@ -69,7 +69,9 @@ def main() -> None:
         series_config_path="config/fred_series.yaml",
     )
 
-    regime_labels = ["expansion", "recession"]
+    # Lowest-mean regime first — regimes are sorted by ascending mean, so
+    # the reverse order puts the name "recession" on the expansion state.
+    regime_labels = ["recession", "expansion"]
     factor_names = ["real_activity", "labor_market", "inflation", "financial_conditions"]
 
     bt = RegimeBacktester(

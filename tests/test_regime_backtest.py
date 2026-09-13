@@ -12,7 +12,6 @@ from src.models.regime_backtest import (
     get_nber_recession_indicator,
 )
 
-
 # ---------------------------------------------------------------------------
 # NBER indicator tests
 # ---------------------------------------------------------------------------
@@ -111,7 +110,7 @@ def test_backtest_full_sample(synthetic_backtest_panel):
     bt = RegimeBacktester(
         n_factors=1,
         n_regimes=2,
-        regime_labels=["expansion", "recession"],
+        regime_labels=["recession", "expansion"],
         recession_labels=["recession"],
     )
     result = bt.run(
@@ -129,7 +128,7 @@ def test_backtest_confusion_matrix_shape(synthetic_backtest_panel):
     panel, nber = synthetic_backtest_panel
     bt = RegimeBacktester(
         n_factors=1, n_regimes=2,
-        regime_labels=["expansion", "recession"],
+        regime_labels=["recession", "expansion"],
         recession_labels=["recession"],
     )
     result = bt.run(
@@ -144,7 +143,7 @@ def test_backtest_metrics_in_range(synthetic_backtest_panel):
     panel, nber = synthetic_backtest_panel
     bt = RegimeBacktester(
         n_factors=1, n_regimes=2,
-        regime_labels=["expansion", "recession"],
+        regime_labels=["recession", "expansion"],
         recession_labels=["recession"],
     )
     result = bt.run(
@@ -162,7 +161,7 @@ def test_backtest_regime_history_columns(synthetic_backtest_panel):
     panel, nber = synthetic_backtest_panel
     bt = RegimeBacktester(
         n_factors=1, n_regimes=2,
-        regime_labels=["expansion", "recession"],
+        regime_labels=["recession", "expansion"],
         recession_labels=["recession"],
     )
     result = bt.run(

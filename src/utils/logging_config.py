@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 from loguru import logger
 
 
 def setup_logging(
     level: str = "INFO",
-    log_file: Optional[str] = None,
+    log_file: str | None = None,
     rotation: str = "10 MB",
     retention: str = "7 days",
 ) -> None:

@@ -11,9 +11,7 @@ Regime-conditional allocations are loaded from ``config/settings.yaml``.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
-import numpy as np
 import pandas as pd
 import yaml
 from loguru import logger
@@ -37,7 +35,7 @@ class RegimeAllocator:
     def __init__(
         self,
         settings_path: str = "config/settings.yaml",
-        custom_weights: Optional[dict[str, dict[str, float]]] = None,
+        custom_weights: dict[str, dict[str, float]] | None = None,
     ) -> None:
         if custom_weights is not None:
             self._regime_weights = custom_weights

@@ -1,0 +1,340 @@
+"""Point-in-time feature generation for downstream models.
+
+The rest of the codebase fits a model once over the full sample and
+reads back a history.  That history is **not** what the model would have
+produced in real time: the DFM's EM parameters, its varimax rotation and
+factor normalisation, the RSM's transition matrix, and the probit's
+coefficients are all estimated using the whole sample, so a value at
+month *t* embeds information from months after *t*.  Measured on this
+repository's own cached data, re-running the nowcaster six years later
+moved 21% of historical months by more than 0.10.
+
+This module builds the history the other way round: one fit per as-of
+date, keeping only the final row of each.  That row is safe because at
+*t = T* the Kalman smoother coincides with the filter and the Kim
+smoother coincides with the Hamilton filter, so no future information can
+reach it.
+
+Usage
+-----
+>>> from src.models.walk_forward import generate_feature_panel
+>>> feats = generate_feature_panel(pipeline, start="2000-01-31", end="2024-12-31")
+>>> feats.to_parquet("data/features.parquet")
+
+The result is suitable as an input to a downstream model.  Join it to a
+target on ``knowable_at``, never on the index: the index is the reference
+month, while ``knowable_at`` is when the row could first have been
+computed.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from loguru import logger
+
+from src.models.nowcaster import Nowcaster
+from src.models.regime_backtest import nber_labels_available_at
+
+# Longest publication lag in fred_series.yaml (CSUSHPISA, 60 days).  A row
+# dated month-end T is not fully computable until every input series for
+# month T has printed, so this is the offset from the reference month to
+# the date the row could first have been built.
+MAX_PUBLICATION_LAG = pd.Timedelta(days=60)
+
+# Momentum horizons, in months, for factor and probability changes.
+_DELTA_HORIZONS = (1, 3, 6)
+
+
+def _safe_delta(series: pd.Series, months: int) -> float:
+    """Change over *months*, or NaN when the history is too short."""
+    if len(series) <= months:
+        return float("nan")
+    current, past = series.iloc[-1], series.iloc[-1 - months]
+    if pd.isna(current) or pd.isna(past):
+        return float("nan")
+    return float(current - past)
+
+
+def _regime_age(prob_recession: pd.Series, threshold: float = 0.5) -> float:
+    """Months since the recession probability last crossed *threshold*.
+
+    A slow-moving state variable is more informative when the model also
+    knows how long the state has held — hazard rates are not flat.
+    """
+    if prob_recession.empty:
+        return float("nan")
+    state = (prob_recession > threshold).astype(int)
+    current = state.iloc[-1]
+    age = 0
+    for value in reversed(state.values):
+        if value != current:
+            break
+        age += 1
+    return float(age)
+
+
+def generate_features_asof(
+    pipeline: Any,
+    as_of: str | pd.Timestamp,
+    *,
+    n_factors: int = 4,
+    n_regimes: int = 2,
+    factor_names: list[str] | None = None,
+    regime_labels: list[str] | None = None,
+    ensemble_weights: dict[str, float] | None = None,
+    probit_config: dict | None = None,
+    respect_nber_announcement_lag: bool = True,
+) -> dict[str, float]:
+    """Build one row of point-in-time features for *as_of*.
+
+    Everything here is computed from a model fitted on data through
+    *as_of* only, and only the final row of that fit is read.
+
+    Parameters
+    ----------
+    pipeline : DataPipeline
+        Must rebuild its panel per call so the ragged edge is masked
+        against *as_of* rather than against today.
+    respect_nber_announcement_lag : bool
+        When ``True`` (default), the supervised probit may only train on
+        NBER labels that had actually been announced by *as_of*.  The
+        turning points themselves are published 5-21 months late, so
+        using the final dated table is look-ahead even when the label's
+        own timestamp precedes *as_of*.
+
+    Returns
+    -------
+    dict[str, float]
+        Feature name → value.  Always includes ``knowable_at``.
+    """
+    as_of = pd.Timestamp(as_of)
+
+    probit_train_end: pd.Timestamp | None = None
+    if respect_nber_announcement_lag:
+        available = nber_labels_available_at(as_of)
+        probit_train_end = (
+            available.index[-1] if len(available) else None
+        )
+
+    nowcaster = Nowcaster(
+        pipeline=pipeline,
+        n_factors=n_factors,
+        n_regimes=n_regimes,
+        factor_names=factor_names,
+        regime_labels=regime_labels,
+        use_ensemble=True,
+        ensemble_weights=ensemble_weights,
+        probit_config=probit_config,
+        probit_train_end=probit_train_end,
+        use_filtered_factors=True,
+    )
+
+    result = nowcaster.run(end_date=str(as_of.date()))
+
+    row: dict[str, float] = {}
+
+    # --- Latent factors and their momentum ---
+    factors = nowcaster._last_factors
+    for name in factors.columns:
+        row[f"factor_{name}"] = float(factors[name].iloc[-1])
+        for h in _DELTA_HORIZONS:
+            row[f"factor_{name}_d{h}m"] = _safe_delta(factors[name], h)
+
+    # --- Ensemble components, unweighted ---
+    # The fixed 0.2/0.4/0.2/0.2 blend is a judgement call; a downstream
+    # model is better placed to learn the combination, and to learn that
+    # one of the components is uninformative.
+    detail = result.ensemble_detail or {}
+    for signal in ("rsm", "probit", "cfnai", "sahm"):
+        row[f"signal_{signal}"] = float(detail.get(signal, np.nan))
+
+    component_values = [
+        v for k, v in detail.items()
+        if k != "ensemble" and not pd.isna(v)
+    ]
+    # Disagreement across signals is a genuine model-uncertainty proxy,
+    # and often more useful than the mean for sizing decisions.
+    row["signal_dispersion"] = (
+        float(np.std(component_values)) if len(component_values) > 1
+        else float("nan")
+    )
+
+    # --- Ensemble probability, level and change ---
+    row["p_recession"] = float(result.recession_probability)
+    ensemble_ts = nowcaster._ensemble_recession_ts
+    if ensemble_ts is not None and len(ensemble_ts):
+        for h in _DELTA_HORIZONS:
+            row[f"p_recession_d{h}m"] = _safe_delta(ensemble_ts, h)
+        row["regime_age_months"] = _regime_age(ensemble_ts)
+    else:
+        for h in _DELTA_HORIZONS:
+            row[f"p_recession_d{h}m"] = float("nan")
+        row["regime_age_months"] = float("nan")
+
+    # --- Regime persistence from the Markov chain ---
+    try:
+        P = nowcaster._rsm.get_transition_matrix()
+        stay_rec = float(P[0, 0])
+        row["p_stay_recession"] = stay_rec
+        # Expected remaining duration of a geometric holding time.
+        row["expected_recession_duration"] = (
+            1.0 / (1.0 - stay_rec) if stay_rec < 1.0 else float("nan")
+        )
+        row["p_enter_recession"] = float(P[-1, 0])
+    except Exception:
+        row["p_stay_recession"] = float("nan")
+        row["expected_recession_duration"] = float("nan")
+        row["p_enter_recession"] = float("nan")
+
+    # --- GDP nowcast ---
+    row["gdp_nowcast"] = float(result.gdp_nowcast)
+    row["gdp_ci_width"] = float(result.gdp_ci_upper - result.gdp_ci_lower)
+
+    # --- Timing ---
+    # Join downstream targets on this, not on the index: the index is the
+    # reference month, this is when the row could first have been built.
+    row["knowable_at"] = as_of + MAX_PUBLICATION_LAG
+
+    return row
+
+
+def generate_feature_panel(
+    pipeline: Any,
+    start: str | pd.Timestamp,
+    end: str | pd.Timestamp | None = None,
+    *,
+    step_months: int = 1,
+    cache_path: str | Path | None = None,
+    on_error: str = "warn",
+    progress: Callable[[int, int, pd.Timestamp], None] | None = None,
+    **feature_kwargs: Any,
+) -> pd.DataFrame:
+    """Walk forward from *start* to *end*, one model fit per date.
+
+    This is deliberately slow — it refits the DFM at every step — so the
+    result is cached incrementally.  Re-running with the same
+    ``cache_path`` resumes rather than recomputing.
+
+    Parameters
+    ----------
+    step_months : int
+        Months between evaluation dates.  Use 1 for a monthly feature
+        panel; larger steps are for quick diagnostic runs.
+    cache_path : str | Path | None
+        CSV written after every row.  Existing rows are reused.
+    on_error : {"warn", "raise"}
+        Whether a failed window aborts the run.
+
+    Returns
+    -------
+    pd.DataFrame
+        Indexed by reference month-end, with a ``knowable_at`` column.
+    """
+    end = pd.Timestamp(end) if end is not None else pd.Timestamp.today()
+    dates = pd.date_range(pd.Timestamp(start), end, freq=f"{step_months}ME")
+
+    cached: dict[pd.Timestamp, dict] = {}
+    cache_file = Path(cache_path) if cache_path else None
+    if cache_file is not None and cache_file.exists():
+        prior = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+        if "knowable_at" in prior.columns:
+            prior["knowable_at"] = pd.to_datetime(prior["knowable_at"])
+        cached = {ts: r for ts, r in prior.to_dict("index").items()}
+        logger.info(f"Resuming from {len(cached)} cached rows in {cache_file}")
+
+    rows: dict[pd.Timestamp, dict] = dict(cached)
+    total = len(dates)
+
+    for i, as_of in enumerate(dates, start=1):
+        if as_of in rows:
+            continue
+        if progress is not None:
+            progress(i, total, as_of)
+        logger.info(f"Walk-forward [{i}/{total}]: fitting as of {as_of.date()}")
+        try:
+            rows[as_of] = generate_features_asof(
+                pipeline, as_of, **feature_kwargs
+            )
+        except Exception as exc:
+            if on_error == "raise":
+                raise
+            logger.warning(f"Walk-forward failed at {as_of.date()}: {exc}")
+            continue
+
+        if cache_file is not None:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame.from_dict(rows, orient="index").sort_index().to_csv(
+                cache_file
+            )
+
+    if not rows:
+        raise RuntimeError("No successful walk-forward windows")
+
+    panel = pd.DataFrame.from_dict(rows, orient="index").sort_index()
+    panel.index.name = "reference_month"
+    return panel
+
+
+def assert_point_in_time(
+    pipeline: Any,
+    early_cutoff: str | pd.Timestamp,
+    late_cutoff: str | pd.Timestamp,
+    *,
+    step_months: int = 3,
+    start: str | pd.Timestamp = "2000-01-31",
+    tolerance: float = 1e-8,
+    **feature_kwargs: Any,
+) -> pd.DataFrame:
+    """Verify that generated features do not change as data is appended.
+
+    Generates the panel twice — once through *early_cutoff*, once through
+    *late_cutoff* — and compares the overlap.  A point-in-time generator
+    produces identical values; anything else means future information is
+    reaching the history.
+
+    This is the gate a feature table should pass before a downstream
+    model consumes it.
+
+    Returns
+    -------
+    pd.DataFrame
+        Per-column maximum absolute difference over the overlap.
+
+    Raises
+    ------
+    AssertionError
+        If any column differs by more than *tolerance*.
+    """
+    early = generate_feature_panel(
+        pipeline, start, early_cutoff, step_months=step_months, **feature_kwargs
+    )
+    late = generate_feature_panel(
+        pipeline, start, late_cutoff, step_months=step_months, **feature_kwargs
+    )
+
+    common_idx = early.index.intersection(late.index)
+    numeric = [
+        c for c in early.columns
+        if c != "knowable_at" and pd.api.types.is_numeric_dtype(early[c])
+    ]
+    diffs = (
+        (early.loc[common_idx, numeric] - late.loc[common_idx, numeric])
+        .abs()
+        .max()
+    )
+
+    offenders = diffs[diffs > tolerance]
+    if len(offenders):
+        raise AssertionError(
+            f"Features are not point-in-time: {len(offenders)} column(s) "
+            f"changed when data through {pd.Timestamp(late_cutoff).date()} "
+            f"was appended to a panel ending "
+            f"{pd.Timestamp(early_cutoff).date()}.\n"
+            f"{offenders.sort_values(ascending=False).head(10).to_string()}"
+        )
+    return diffs.to_frame("max_abs_diff")

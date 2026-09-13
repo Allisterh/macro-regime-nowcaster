@@ -5,15 +5,15 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
-from unittest.mock import MagicMock, patch
 
+from src.data.data_pipeline import DataPipeline
 from src.data.fred_client import FREDClient
 from src.data.storage import DataStorage
-from src.data.data_pipeline import DataPipeline
 
 
 @pytest.fixture

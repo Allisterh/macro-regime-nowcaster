@@ -7,9 +7,6 @@ FRED data.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
-from typing import Optional
-
 import pandas as pd
 
 
@@ -86,7 +83,7 @@ def business_days_between(start: pd.Timestamp, end: pd.Timestamp) -> int:
 def ragged_edge_mask(
     df: pd.DataFrame,
     series_lags: dict[str, int],
-    as_of_date: Optional[pd.Timestamp] = None,
+    as_of_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Apply publication lags to create a ragged-edge mask.
 
@@ -105,11 +102,19 @@ def ragged_edge_mask(
         as_of_date = pd.Timestamp.today().normalize()
 
     result = df.copy()
+    if result.empty:
+        return result
+
+    # Vectorised over the index: publication date is a pure function of
+    # (observation date, lag), so one timedelta shift per column replaces
+    # the former T x N scalar .loc assignments (~38k per run on the full
+    # panel, which dominated pipeline time in the expanding backtests).
+    index = pd.DatetimeIndex(df.index)
     for col in df.columns:
-        lag = series_lags.get(col, 0)
-        for idx in df.index:
-            pub_date = get_publication_date(idx, lag)
-            if pub_date > as_of_date:
-                result.loc[idx, col] = float("nan")
+        lag = int(series_lags.get(col, 0))
+        pub_dates = index + pd.Timedelta(days=lag)
+        unavailable = pub_dates > as_of_date
+        if unavailable.any():
+            result.loc[unavailable, col] = float("nan")
 
     return result

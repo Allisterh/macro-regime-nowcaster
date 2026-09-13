@@ -14,16 +14,16 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
-import numpy as np
-import pandas as pd
 import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from matplotlib.patches import Rectangle
-from matplotlib.colors import LinearSegmentedColormap
+import pandas as pd
 
+matplotlib.use("Agg")
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 from dotenv import load_dotenv
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Rectangle
+
 load_dotenv()
 
 OUT = _ROOT / "docs" / "images"
@@ -77,8 +77,9 @@ def _add_nber(ax, ymin=0, ymax=1):
 def run_nowcast():
     """Run the full pipeline and return nowcaster + result."""
     import os
-    from src.data.fred_client import FREDClient
+
     from src.data.data_pipeline import DataPipeline
+    from src.data.fred_client import FREDClient
     from src.models.nowcaster import Nowcaster
 
     api_key = os.getenv("FRED_API_KEY", "")
@@ -124,7 +125,7 @@ def plot_regime_probabilities(nowcaster, result):
     fig.savefig(OUT / "regime_probabilities.png", dpi=180, facecolor=DARK_BG,
                 bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ regime_probabilities.png")
+    print("  ✓ regime_probabilities.png")
 
 
 def plot_latent_factors(nowcaster, result):
@@ -164,7 +165,7 @@ def plot_latent_factors(nowcaster, result):
     fig.savefig(OUT / "latent_factors.png", dpi=180, facecolor=DARK_BG,
                 bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ latent_factors.png")
+    print("  ✓ latent_factors.png")
 
 
 def plot_regime_timeline(nowcaster, result):
@@ -177,7 +178,6 @@ def plot_regime_timeline(nowcaster, result):
 
     # Create a continuous color strip
     dates = rec.index
-    colors_arr = np.array([rec.values, np.zeros_like(rec.values)])
 
     # Custom colormap: green (expansion) → red (recession)
     cmap = LinearSegmentedColormap.from_list(
@@ -207,7 +207,7 @@ def plot_regime_timeline(nowcaster, result):
     fig.savefig(OUT / "regime_timeline.png", dpi=180, facecolor=DARK_BG,
                 bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ regime_timeline.png")
+    print("  ✓ regime_timeline.png")
 
 
 def plot_ensemble_breakdown(nowcaster, result):
@@ -220,7 +220,7 @@ def plot_ensemble_breakdown(nowcaster, result):
     try:
         rsm_probs = nowcaster._rsm.get_recession_probability()
         if isinstance(rsm_probs, pd.Series):
-            rsm_ts = rsm_probs.reindex(idx).ffill().bfill().fillna(0.5)
+            rsm_ts = rsm_probs.reindex(idx).fillna(0.5)
         else:
             rsm_ts = pd.Series(rsm_probs, index=idx).fillna(0.5)
     except Exception:
@@ -230,7 +230,7 @@ def plot_ensemble_breakdown(nowcaster, result):
     try:
         probit_features = nowcaster._build_probit_features(factors, nowcaster._last_panel)
         all_proba = nowcaster._probit.predict_proba(probit_features)
-        probit_ts = pd.Series(all_proba, index=probit_features.index).reindex(idx).ffill().bfill().fillna(0.5)
+        probit_ts = pd.Series(all_proba, index=probit_features.index).reindex(idx).fillna(0.5)
     except Exception:
         probit_ts = pd.Series(0.5, index=idx)
 
@@ -264,7 +264,7 @@ def plot_ensemble_breakdown(nowcaster, result):
     fig.savefig(OUT / "ensemble_breakdown.png", dpi=180, facecolor=DARK_BG,
                 bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ ensemble_breakdown.png")
+    print("  ✓ ensemble_breakdown.png")
 
 
 def plot_dashboard_hero(result):
@@ -311,7 +311,7 @@ def plot_dashboard_hero(result):
     fig.savefig(OUT / "dashboard_banner.png", dpi=180, facecolor=DARK_BG,
                 bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ dashboard_banner.png")
+    print("  ✓ dashboard_banner.png")
 
 
 def plot_architecture():
@@ -382,7 +382,7 @@ def plot_architecture():
     fig.savefig(OUT / "architecture.png", dpi=180, facecolor=DARK_BG,
                 bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ architecture.png")
+    print("  ✓ architecture.png")
 
 
 if __name__ == "__main__":
