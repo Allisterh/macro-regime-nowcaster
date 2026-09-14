@@ -57,6 +57,7 @@ def main() -> int:
 
     import os
     import pickle
+
     import yaml
 
     api_key = os.environ.get("FRED_API_KEY", "")
@@ -79,8 +80,8 @@ def main() -> int:
     start_date = settings.get("data", {}).get("start_date", "1980-01-01")
     cache_dir = settings.get("data", {}).get("cache_dir", "data/cache")
 
-    from src.data.fred_client import FREDClient
     from src.data.data_pipeline import DataPipeline
+    from src.data.fred_client import FREDClient
     from src.models.dynamic_factor_model import DynamicFactorModel
     from src.models.regime_switching import RegimeSwitchingModel
 

@@ -60,6 +60,7 @@ def main() -> int:
     setup_logging(level=args.log_level)
 
     import os
+
     import yaml
 
     api_key = os.environ.get("FRED_API_KEY", "")
@@ -78,8 +79,8 @@ def main() -> int:
     cache_dir = settings.get("data", {}).get("cache_dir", "data/cache")
     db_path = settings.get("data", {}).get("database_path", "data/nowcaster.duckdb")
 
-    from src.data.fred_client import FREDClient
     from src.data.data_pipeline import DataPipeline
+    from src.data.fred_client import FREDClient
     from src.data.storage import DataStorage
 
     logger.info("Initialising FRED client")

@@ -5,8 +5,8 @@ from __future__ import annotations
 import shutil
 import tempfile
 
-from loguru import logger
 import pytest
+from loguru import logger
 
 from src.utils.logging_config import setup_logging
 

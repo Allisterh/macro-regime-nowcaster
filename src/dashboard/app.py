@@ -26,10 +26,9 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from loguru import logger
 
@@ -48,6 +47,74 @@ NBER_RECESSIONS = [
     ("2007-12-01", "2009-06-30"),
     ("2020-02-01", "2020-04-30"),
 ]
+
+# ---------------------------------------------------------------------------
+# Real-time (walk-forward) history
+# ---------------------------------------------------------------------------
+# A single Nowcaster.run() fits the DFM, RSM and probit on the whole sample it
+# is given, so the *history* it returns is an in-sample fit: at any past month
+# it embeds parameters estimated from data that had not happened yet.  The
+# latest point is real-time-safe (there, the Kalman smoother coincides with the
+# filter), which is what the headline metrics use — but the historical curve is
+# not what the model would have printed at the time.
+#
+# scripts/build_features.py refits once per as-of date and keeps only each
+# fit's final row.  When that panel exists we overlay it, so the gap between
+# the two lines is visible rather than implied.
+#
+# Only the current-format panel is read.  An earlier version of this loader
+# also fell back to data/oos_validation.csv, which was produced by a
+# superseded run_validation.py: annually spaced, with a probit pinned at its
+# old 0.05 clip floor in 25 of 27 rows and an inverted RSM sitting at 0.98 in
+# 17 of 27.  Drawn next to NBER bands it read as a plausible track record and
+# invited conclusions the underlying numbers could not support.  A stale panel
+# is worse than no panel, so the fallback is gone.
+WALK_FORWARD_PATH = Path("data/features.csv")
+
+# Sampling coarser than this cannot resolve a short recession — the 2020
+# downturn lasted two months — so the caption says so rather than letting a
+# flat line read as "the model missed it".
+_COARSE_SAMPLING_DAYS = 45
+
+
+@st.cache_data(show_spinner=False)
+def load_walk_forward() -> dict | None:
+    """Load the precomputed point-in-time panel, if one has been generated.
+
+    Returns ``None`` when no panel is on disk — the dashboard then shows
+    only the in-sample curve, clearly labelled as such.
+
+    The returned dict carries sampling metadata alongside the series so the
+    chart can state its resolution and date range instead of leaving the
+    reader to infer them from the line.
+    """
+    path = WALK_FORWARD_PATH
+    if not path.exists():
+        return None
+    try:
+        frame = pd.read_csv(path, index_col=0, parse_dates=True).sort_index()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not read walk-forward panel {path}: {exc}")
+        return None
+
+    if "p_recession" not in frame.columns:
+        logger.warning(f"{path} has no p_recession column; ignoring")
+        return None
+
+    series = pd.to_numeric(frame["p_recession"], errors="coerce").dropna()
+    if len(series) < 2:
+        return None
+
+    spacing_days = float(series.index.to_series().diff().dt.days.median())
+    return {
+        "series": series,
+        "source": str(path),
+        "n": len(series),
+        "start": series.index[0],
+        "end": series.index[-1],
+        "spacing_days": spacing_days,
+        "coarse": spacing_days > _COARSE_SAMPLING_DAYS,
+    }
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -94,13 +161,23 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Architecture**")
     st.markdown(
-        "DFM → RSM + Probit + CFNAI → Ensemble → Allocation"
+        "DFM → RSM + Probit + CFNAI + Sahm → Ensemble → Allocation"
     )
-    st.markdown(
-        "- **RSM weight:** 0.25\n"
-        "- **Probit weight:** 0.50\n"
-        "- **CFNAI weight:** 0.25"
-    )
+    # Read the weights from the model rather than restating them here.
+    # Hard-coding is how this panel came to advertise a three-signal
+    # 0.25 / 0.50 / 0.25 split long after the shipped ensemble moved to
+    # four signals at 0.20 / 0.40 / 0.20 / 0.20.
+    try:
+        from src.models.nowcaster import Nowcaster as _NowcasterWeights
+
+        st.markdown(
+            "\n".join(
+                f"- **{name.upper()} weight:** {weight:.2f}"
+                for name, weight in _NowcasterWeights.DEFAULT_WEIGHTS.items()
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read ensemble weights for the sidebar")
 
 # ---------------------------------------------------------------------------
 # Main title
@@ -162,8 +239,8 @@ def _run_nowcast(start: str, end: str, n_fac: int):
         return None, "FRED_API_KEY not set — add it to your .env file."
 
     try:
-        from src.data.fred_client import FREDClient
         from src.data.data_pipeline import DataPipeline
+        from src.data.fred_client import FREDClient
         from src.models.nowcaster import Nowcaster
 
         client = FREDClient(api_key=api_key)
@@ -366,6 +443,12 @@ else:
             margin=dict(l=10, r=10, t=10, b=30),
         )
         st.plotly_chart(fig_probs, use_container_width=True)
+        st.caption(
+            "In-sample: the model is fitted on the full selected window, so past "
+            "months are scored with parameters estimated partly from later data. "
+            "The most recent point is real-time-safe; earlier points are not a "
+            "track record."
+        )
     else:
         st.warning("No regime probabilities to display")
 
@@ -427,10 +510,12 @@ else:
     # 6. Regime timeline with NBER shading
     # ==================================================================
     st.subheader("Historical Regime Classification")
+    walk_forward = load_walk_forward()
+
     if isinstance(regime_probs, pd.DataFrame) and "recession" in regime_probs.columns:
         fig_timeline = go.Figure()
 
-        # Recession probability as a filled area
+        # In-sample recession probability as a filled area
         fig_timeline.add_trace(
             go.Scatter(
                 x=regime_probs.index,
@@ -439,9 +524,28 @@ else:
                 fill="tozeroy",
                 fillcolor="rgba(231, 76, 60, 0.3)",
                 line=dict(color="#e74c3c", width=1.5),
-                name="P(Recession)",
+                name="P(Recession) — in-sample",
             )
         )
+
+        # Real-time line, when a walk-forward panel has been generated.
+        # The gap between the two is the look-ahead advantage the
+        # in-sample curve enjoys, and it is the most honest thing this
+        # chart can show.
+        if walk_forward is not None:
+            wf_series = walk_forward["series"]
+            fig_timeline.add_trace(
+                go.Scatter(
+                    x=wf_series.index,
+                    y=wf_series.values,
+                    mode="lines+markers",
+                    line=dict(color="#2c3e50", width=1.8, dash="dot"),
+                    marker=dict(size=5),
+                    name="P(Recession) — real-time (walk-forward)",
+                    hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1%}<extra></extra>",
+                )
+            )
+
         # 50% threshold
         fig_timeline.add_hline(
             y=0.5, line_dash="dash", line_color="grey",
@@ -455,10 +559,52 @@ else:
                 title="Date",
                 range=[regime_probs.index.min(), regime_probs.index.max()],
             ),
-            height=250,
+            height=280,
             margin=dict(l=10, r=10, t=10, b=30),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02,
+                xanchor="right", x=1,
+            ),
         )
         st.plotly_chart(fig_timeline, use_container_width=True)
+
+        if walk_forward is not None:
+            spacing = walk_forward["spacing_days"]
+            cadence = (
+                f"~{spacing / 30.4:.0f}-month" if spacing > 45 else "monthly"
+            )
+            st.caption(
+                "**Red (in-sample)**: every past month is scored by a model fitted "
+                "on the whole sample, so it embeds parameters estimated from data "
+                "that had not happened yet — it is not what the model would have "
+                "printed at the time. "
+                f"**Dark dotted (real-time)**: one refit per date, final row only — "
+                f"{walk_forward['n']} points at {cadence} spacing, "
+                f"{walk_forward['start']:%b %Y} to {walk_forward['end']:%b %Y} "
+                f"(`{walk_forward['source']}`). Judge historical skill from the "
+                "dotted line, and only within that range."
+            )
+            if walk_forward["coarse"]:
+                st.warning(
+                    f"The real-time line is sampled every ~{spacing:.0f} days. "
+                    "Recessions shorter than that can fall entirely between two "
+                    "points — the 2020 downturn lasted two months — so a flat "
+                    "line across one is a limit of the sampling, not evidence "
+                    "the model missed it. Regenerate with "
+                    "`python scripts/build_features.py --step 1` for monthly "
+                    "resolution.",
+                    icon="⚠️",
+                )
+        else:
+            st.caption(
+                ":warning: **This is an in-sample fit, not a track record.** Each "
+                "past month is scored by a model fitted on the whole sample, "
+                "including data that post-dates it, so the curve hugs the NBER "
+                "bands more closely than real-time performance would. The *latest* "
+                "point is real-time-safe; the history is not. "
+                "Run `python scripts/build_features.py` to generate the "
+                "walk-forward panel and a real-time line will be overlaid here."
+            )
 
     st.markdown("---")
 

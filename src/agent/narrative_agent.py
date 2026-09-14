@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 from loguru import logger
 
-from src.agent.prompts import MACRO_ANALYST_SYSTEM_PROMPT, format_narrative_prompt
 from src.agent.fed_scraper import FedDocument
+from src.agent.prompts import MACRO_ANALYST_SYSTEM_PROMPT, format_narrative_prompt
 
 
 @dataclass
@@ -55,7 +54,7 @@ class NarrativeAgent:
         model: str = "gpt-4o-mini",
         temperature: float = 0.3,
         max_tokens: int = 1500,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
     ) -> None:
         self.model = model
         self.temperature = temperature
@@ -77,7 +76,7 @@ class NarrativeAgent:
     def generate(
         self,
         nowcast_result: dict,
-        fed_documents: Optional[list[FedDocument]] = None,
+        fed_documents: list[FedDocument] | None = None,
     ) -> NarrativeReport:
         """Generate a narrative report for the given nowcast.
 
@@ -180,7 +179,7 @@ class NarrativeAgent:
 # ---------------------------------------------------------------------------
 
 
-def _extract_section(text: str, start_marker: str, end_marker: Optional[str]) -> str:
+def _extract_section(text: str, start_marker: str, end_marker: str | None) -> str:
     """Extract text between two markdown section headers.
 
     Handles multiple heading formats the LLM may produce:
@@ -205,7 +204,7 @@ def _extract_section(text: str, start_marker: str, end_marker: Optional[str]) ->
     return match.group(1).strip() if match else ""
 
 
-def _extract_bullets(text: str, start_marker: str, end_marker: Optional[str]) -> list[str]:
+def _extract_bullets(text: str, start_marker: str, end_marker: str | None) -> list[str]:
     """Extract bullet-point items from a section."""
     section = _extract_section(text, start_marker, end_marker)
     bullets = []

@@ -119,21 +119,21 @@ def recession_breakdown(history: pd.DataFrame) -> None:
         if first_detect is not None:
             print(f"  First detection  : {str(first_detect.date())[:7]}")
         else:
-            print(f"  First detection  : NEVER DETECTED")
+            print("  First detection  : NEVER DETECTED")
         print(f"  Avg P(rec) during: {avg_prob_rec:.1%}")
         print(f"  Max P(rec) during: {max_prob_rec:.1%}")
         print(f"  Avg P(rec) before: {avg_prob_pre:.1%}")
         print(f"  False alarms     : {pre_false} before, {post_false} after")
 
         if signal_cols:
-            print(f"  Signal averages during recession:")
+            print("  Signal averages during recession:")
             for sc in signal_cols:
                 if sc in rec_months.columns:
                     avg = rec_months[sc].mean()
                     print(f"    {sc.replace('signal_', ''):>10s}: {avg:.1%}")
 
     # Overall summary
-    print(f"\n  --- Overall False Alarm Analysis ---")
+    print("\n  --- Overall False Alarm Analysis ---")
     exp_total = history[history[nber_col] == 0]
     if len(exp_total) > 0:
         fa = (exp_total[pred_col] == 1).sum()
@@ -154,131 +154,40 @@ def expanding_window_ensemble(
 ) -> pd.DataFrame:
     """Expanding-window out-of-sample ensemble backtest.
 
-    At each evaluation point, fits DFM + RSM + probit on data up to
-    that date only, produces an ensemble probability, and records it.
-    """
-    from scipy.stats import norm as sp_norm
-    from src.models.dynamic_factor_model import DynamicFactorModel
-    from src.models.regime_switching import RegimeSwitchingModel
-    from src.models.recession_probit import RecessionProbit
+    Delegates to :func:`src.models.walk_forward.generate_feature_panel`,
+    which refits the *production* Nowcaster at each date and keeps only
+    its final row.
 
-    w = ensemble_weights or {"rsm": 0.25, "probit": 0.50, "cfnai": 0.25}
+    This function used to re-implement the ensemble inline and drifted
+    away from what the model actually serves: different weights
+    (0.25/0.50/0.25 vs 0.20/0.40/0.20/0.20), no Sahm signal, a different
+    CFNAI mapping (``norm.cdf(-x)`` rather than the logistic at -0.7),
+    and ``.ffill()`` on features that production deliberately leaves as
+    NaN.  Whatever it measured, it was not the shipped model.
+    """
+    from src.models.walk_forward import generate_feature_panel
 
     if end is None:
         end = str(pd.Timestamp.today().date())
 
-    eval_start = pd.Timestamp(start_eval)
-    eval_dates = pd.date_range(eval_start, end, freq=f"{step_months}ME")
+    feats = generate_feature_panel(
+        pipeline,
+        start=start_eval,
+        end=end,
+        step_months=step_months,
+        cache_path="data/oos_validation_interim.csv",
+        ensemble_weights=ensemble_weights,
+    )
 
-    rows = []
-    n_total = len(eval_dates)
-
-    for i, eval_dt in enumerate(eval_dates):
-        train_panel = panel.loc[:eval_dt]
-        if len(train_panel) < min_train_months:
-            continue
-
-        logger.info(
-            f"Expanding window [{i+1}/{n_total}]: "
-            f"training up to {eval_dt.date()}"
-        )
-
-        try:
-            # Fit DFM (reduced iterations for speed)
-            dfm = DynamicFactorModel(
-                n_factors=4,
-                factor_names=[
-                    "real_activity", "labor_market",
-                    "inflation", "financial_conditions",
-                ],
-                max_iter=30,
-            )
-            dfm.fit(train_panel)
-            factors = dfm.factors_
-            if not isinstance(factors, pd.DataFrame):
-                factors = pd.DataFrame(factors)
-
-            # Fit RSM (1 restart for speed in OOS)
-            rsm = RegimeSwitchingModel(
-                n_regimes=2,
-                regime_labels=["expansion", "recession"],
-                multivariate=True,
-                n_restarts=1,
-                max_iter=100,
-            )
-            rsm.fit(factors)
-
-            # RSM signal (last time step)
-            rec_prob = rsm.get_recession_probability()
-            if isinstance(rec_prob, pd.Series):
-                p_rsm = float(rec_prob.iloc[-1])
-            else:
-                p_rsm = float(rec_prob[-1])
-
-            # Probit signal
-            p_probit = 0.5
-            probit_feats = factors.copy()
-            leading_codes = ["T10Y2Y", "BAA10Y"]
-            for code in ["CFNAI", "T10Y2Y", "BAA10Y"]:
-                if code in train_panel.columns:
-                    probit_feats[code] = (
-                        train_panel[code].reindex(factors.index).ffill()
-                    )
-            for code in leading_codes:
-                if code in train_panel.columns:
-                    series = train_panel[code].reindex(factors.index).ffill()
-                    for lag_m in [3, 6]:
-                        probit_feats[f"{code}_lag{lag_m}"] = series.shift(lag_m)
-            probit_feats = probit_feats.ffill()
-
-            train_nber = nber.loc[
-                nber.index.intersection(probit_feats.index)
-            ]
-            if len(train_nber) >= 30:
-                probit = RecessionProbit(add_lags=3, regularization=1.0)
-                probit.fit(
-                    probit_feats.loc[train_nber.index],
-                    train_nber,
-                )
-                all_proba = probit.predict_proba(probit_feats)
-                p_probit = float(all_proba[-1])
-
-            # CFNAI signal
-            p_cfnai = 0.5
-            if "CFNAI" in train_panel.columns:
-                cfnai_val = float(
-                    train_panel["CFNAI"].dropna().iloc[-1]
-                )
-                p_cfnai = float(sp_norm.cdf(-cfnai_val))
-
-            # Ensemble
-            p_ensemble = (
-                w.get("rsm", 0.25) * p_rsm
-                + w.get("probit", 0.50) * p_probit
-                + w.get("cfnai", 0.25) * p_cfnai
-            )
-
-            rows.append({
-                "date": eval_dt,
-                "p_rsm": p_rsm,
-                "p_probit": p_probit,
-                "p_cfnai": p_cfnai,
-                "p_ensemble": p_ensemble,
-            })
-
-            # Save intermediate results after each window
-            if len(rows) % 3 == 0:
-                _interim = pd.DataFrame(rows).set_index("date")
-                _interim.to_csv("data/oos_validation_interim.csv")
-                logger.debug(f"Saved interim results ({len(rows)} windows)")
-
-        except Exception as exc:
-            logger.warning(f"Expanding window failed at {eval_dt}: {exc}")
-            import traceback
-            traceback.print_exc()
-            continue
-
-    return pd.DataFrame(rows).set_index("date")
+    out = pd.DataFrame({
+        "p_rsm": feats.get("signal_rsm"),
+        "p_probit": feats.get("signal_probit"),
+        "p_cfnai": feats.get("signal_cfnai"),
+        "p_sahm": feats.get("signal_sahm"),
+        "p_ensemble": feats["p_recession"],
+    }, index=feats.index)
+    out.index.name = "date"
+    return out
 
 
 def evaluate_expanding(oos_probs: pd.DataFrame, nber: pd.Series) -> None:
@@ -291,20 +200,16 @@ def evaluate_expanding(oos_probs: pd.DataFrame, nber: pd.Series) -> None:
     nber_aligned = nber.loc[common].astype(int)
     ensemble = oos_probs["p_ensemble"].loc[common]
 
-    # Find optimal threshold
-    best_f1, best_thr = 0.0, 0.5
-    for thr in np.arange(0.05, 0.96, 0.05):
-        pred = (ensemble > thr).astype(int)
-        tp_ = int(((pred == 1) & (nber_aligned == 1)).sum())
-        fp_ = int(((pred == 1) & (nber_aligned == 0)).sum())
-        fn_ = int(((pred == 0) & (nber_aligned == 1)).sum())
-        pr_ = tp_ / (tp_ + fp_) if (tp_ + fp_) > 0 else 0.0
-        re_ = tp_ / (tp_ + fn_) if (tp_ + fn_) > 0 else 0.0
-        f1_ = 2 * pr_ * re_ / (pr_ + re_) if (pr_ + re_) > 0 else 0.0
-        if f1_ > best_f1:
-            best_f1, best_thr = f1_, thr
+    # Fixed threshold.  Sweeping for the F1-maximising cut-off and then
+    # reporting metrics at it selects a hyper-parameter on the evaluation
+    # labels, which inflates every number that follows.  AUC and Brier
+    # below are threshold-free and are what to compare across versions.
+    from src.models.regime_backtest import brier_score, roc_auc
 
-    pred = (ensemble > best_thr).astype(int)
+    thr = 0.5
+    pred = (ensemble > thr).astype(int)
+    auc = roc_auc(nber_aligned.values, ensemble.values)
+    brier = brier_score(nber_aligned.values, ensemble.values)
 
     tp = int(((pred == 1) & (nber_aligned == 1)).sum())
     fp = int(((pred == 1) & (nber_aligned == 0)).sum())
@@ -336,9 +241,13 @@ def evaluate_expanding(oos_probs: pd.DataFrame, nber: pd.Series) -> None:
     print("  EXPANDING-WINDOW OUT-OF-SAMPLE BACKTEST")
     print("=" * 60)
     print(f"  Evaluation points  : {len(common)}")
-    print(f"  Optimal threshold  : {best_thr:.2f}")
-    print(f"  Overall accuracy   : {accuracy:.1%}")
     print()
+    print("  --- Threshold-free (cannot be tuned on labels) ---")
+    print(f"  ROC AUC            : {auc:.3f}")
+    print(f"  Brier score        : {brier:.4f}")
+    print()
+    print(f"  --- At fixed threshold {thr:.2f} ---")
+    print(f"  Overall accuracy   : {accuracy:.1%}")
     print("  --- Recession Detection ---")
     print(f"  Precision          : {precision:.1%}")
     print(f"  Recall             : {recall:.1%}")
@@ -347,7 +256,7 @@ def evaluate_expanding(oos_probs: pd.DataFrame, nber: pd.Series) -> None:
     print(f"  False alarm rate   : {false_alarm:.1%}")
     print()
     print("  --- Confusion Matrix ---")
-    print(f"         Pred Exp  Pred Rec")
+    print("         Pred Exp  Pred Rec")
     print(f"  NBER Exp  {tn:>6d}  {fp:>6d}")
     print(f"  NBER Rec  {fn:>6d}  {tp:>6d}")
     print()
@@ -410,8 +319,8 @@ def main() -> None:
         logger.error("FRED_API_KEY not set.")
         sys.exit(1)
 
-    from src.data.fred_client import FREDClient
     from src.data.data_pipeline import DataPipeline
+    from src.data.fred_client import FREDClient
     from src.models.regime_backtest import (
         RegimeBacktester,
         get_nber_recession_indicator,
@@ -443,7 +352,7 @@ def main() -> None:
                 "real_activity", "labor_market",
                 "inflation", "financial_conditions",
             ],
-            regime_labels=["expansion", "recession"],
+            regime_labels=["recession", "expansion"],
             recession_labels=["recession"],
             use_ensemble=True,
         )

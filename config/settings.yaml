@@ -1,9 +1,12 @@
 model:
   n_factors: 4
   n_regimes: 2
+  # Order matters and is validated at construction: regimes are sorted by
+  # ascending mean, so the lowest-mean (recession) state must come first.
+  # The reverse order silently inverts the recession probability.
   regime_labels:
-    - expansion
     - recession
+    - expansion
   factor_names:
     - real_activity
     - labor_market
@@ -16,19 +19,42 @@ model:
     initial_state_cov: 1.0
 
   # Ensemble recession detection
+  #
+  # Weights set from a 434-point monthly walk-forward (1990-2026) covering
+  # four recessions, each point a separate refit scored against NBER.
+  # Measured out-of-sample:
+  #
+  #   configuration                              AUC     Brier
+  #   cfnai .50 / probit .375 / sahm .125          0.944  0.0544   <- this
+  #   ...with rsm at .10                           0.931  0.0609
+  #   ...with rsm at .20                           0.924  0.0736
+  #   CFNAI signal alone                           0.947  0.0521
+  #
+  # A constant forecast at the 8.3% base rate scores Brier 0.0761. Note
+  # the CFNAI signal alone still edges out the full ensemble: the factor
+  # machinery is not earning its keep as a standalone detector, only as a
+  # partly-independent second read. See README, Measured Real-Time
+  # Performance.
   ensemble:
     enabled: true
     weights:
-      rsm: 0.20        # Multivariate Markov-switching model
-      probit: 0.40      # Probit model (supervised, highest weight)
-      cfnai: 0.20       # CFNAI threshold signal
-      sahm: 0.20        # Sahm rule (unemployment-based, highly reliable)
+      # Zero, not removed: the Markov-switching model is retained and still
+      # published in ensemble_detail. The regime-ordering bug behind its
+      # latching is fixed (AUC 0.600 -> 0.714, latching 51% -> 35% of
+      # months), but it still reports 42.5% recession probability during
+      # expansions and degrades the ensemble at any positive weight.
+      rsm: 0.0
+      probit: 0.375     # Supervised; strongest single learned signal
+      cfnai: 0.50       # Chicago Fed coincident index — best standalone
+      sahm: 0.125       # Unemployment-based; correlated with the above
     probit:
-      add_lags: 1
-      regularization: 0.01
+      add_lags: 3
+      regularization: 1.0
+      class_balanced: true
       extra_features:
         - CFNAI
         - T10Y2Y
+        - BAA10Y
 
 allocation:
   regime_conditional_weights:

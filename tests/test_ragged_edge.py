@@ -11,7 +11,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.data.data_pipeline import DataPipeline
 from src.utils.date_utils import ragged_edge_mask

@@ -6,16 +6,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.data.data_pipeline import DataPipeline
 from src.data.transformations import (
-    log_difference,
+    apply_all_transforms,
+    apply_transform,
     first_difference,
+    log_difference,
     percent_change,
     standardize,
-    apply_transform,
-    apply_all_transforms,
 )
-from src.data.data_pipeline import DataPipeline
-
 
 # ---------------------------------------------------------------------------
 # Transformation tests

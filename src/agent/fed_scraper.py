@@ -16,13 +16,10 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from datetime import date
-from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
 from loguru import logger
-
 
 _BASE_URL = "https://www.federalreserve.gov"
 _FOMC_CALENDAR_URL = f"{_BASE_URL}/monetarypolicy/fomccalendars.htm"
@@ -204,7 +201,7 @@ class FedScraper:
         doc_type: str,
         meeting_date: str = "",
         title: str = "",
-    ) -> Optional[FedDocument]:
+    ) -> FedDocument | None:
         """Fetch a single document page and extract its text."""
         try:
             resp = self._get(url)

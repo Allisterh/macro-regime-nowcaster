@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
+from src.agent.fed_scraper import _clean_text, _extract_date_from_url
+from src.agent.narrative_agent import NarrativeAgent, NarrativeReport
 from src.agent.prompts import (
     MACRO_ANALYST_SYSTEM_PROMPT,
     NARRATIVE_TEMPLATE,
     format_narrative_prompt,
 )
-from src.agent.narrative_agent import NarrativeAgent, NarrativeReport
-from src.agent.fed_scraper import FedDocument, _extract_date_from_url, _clean_text
-
 
 # ---------------------------------------------------------------------------
 # Prompt tests

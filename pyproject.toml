@@ -68,12 +68,38 @@ include = ["src*", "scripts*"]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "slow: repeatedly refits the DFM/RSM (minutes, not seconds). Run the fast suite with `-m 'not slow'`.",
+    "live: hits the FRED API. Skipped automatically when FRED_API_KEY is unset.",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP"]
-ignore = ["E501"]
+ignore = [
+    "E501",  # line length is handled by the formatter
+    # State-space and factor-model code is written in the notation of the
+    # papers it implements: Y = C F + e, F = A F + n, with K factors over
+    # T periods.  Renaming these to snake_case would make the code harder
+    # to check against Hamilton (1989) or Mariano-Murasawa (2003), not
+    # easier, so the naming rules are off for single-capital math symbols.
+    "N802",  # function names (e.g. estrella_mishkin classmethods)
+    "N803",  # argument names: K, T, D, N, P
+    "N806",  # local variables: A, C, Q, R, U, S, Vt, P
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts bootstrap sys.path before importing from src/, so their imports
+# genuinely cannot all sit at the top of the file.
+"scripts/*.py" = ["E402"]
+# Notebook-style exploratory imports inside test helpers.
+"tests/*.py" = ["E402"]
+# The dashboard inserts the project root on sys.path before importing
+# from src/, so its imports cannot all sit at the top of the file.
+"src/dashboard/app.py" = ["E402"]
 
 [tool.black]
 line-length = 100

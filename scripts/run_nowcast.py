@@ -54,6 +54,7 @@ def main() -> int:
     setup_logging(level=args.log_level)
 
     import os
+
     import yaml
 
     api_key = os.environ.get("FRED_API_KEY", "")
@@ -80,9 +81,10 @@ def main() -> int:
     ensemble_cfg = model_cfg.get("ensemble", {})
     use_ensemble = ensemble_cfg.get("enabled", True)
     ensemble_weights = ensemble_cfg.get("weights", None)
+    probit_config = ensemble_cfg.get("probit", None)
 
-    from src.data.fred_client import FREDClient
     from src.data.data_pipeline import DataPipeline
+    from src.data.fred_client import FREDClient
     from src.models.nowcaster import Nowcaster
 
     client = FREDClient(api_key=api_key, cache_dir=cache_dir)
@@ -95,6 +97,7 @@ def main() -> int:
         factor_names=factor_names,
         use_ensemble=use_ensemble,
         ensemble_weights=ensemble_weights,
+        probit_config=probit_config,
     )
 
     logger.info("Running nowcast…")

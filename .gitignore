@@ -31,7 +31,10 @@ ENV/
 *.ipynb_checkpoints
 
 # Data files
-data/
+# Anchored with a leading slash: a bare `data/` matches a directory of
+# that name at ANY depth, which silently excluded src/data/ — the whole
+# data layer — from version control.
+/data/
 *.db
 *.duckdb
 *.parquet
@@ -50,6 +53,9 @@ logs/
 *.log
 
 # Model artifacts
-models/
+# Anchored for the same reason: a bare `models/` excluded src/models/,
+# which is the DFM, Kalman filter, regime-switching model, probit,
+# backtester and nowcaster — the core of the project.
+/models/
 *.pkl
 *.joblib

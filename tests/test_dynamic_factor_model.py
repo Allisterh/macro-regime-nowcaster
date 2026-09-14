@@ -7,11 +7,9 @@ synthetic data and that the statsmodels wrapper has a consistent API.
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from src.models.dynamic_factor_model import DynamicFactorModel, _fill_for_pca, _varimax
-
 
 # ---------------------------------------------------------------------------
 # DynamicFactorModel tests

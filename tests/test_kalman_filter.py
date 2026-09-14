@@ -7,10 +7,8 @@ model, and checks that NaN handling (ragged edge) works correctly.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
-from src.models.kalman_filter import KalmanFilter, FilterResult, SmootherResult
-
+from src.models.kalman_filter import FilterResult, KalmanFilter, SmootherResult
 
 # ---------------------------------------------------------------------------
 # Local level model tests

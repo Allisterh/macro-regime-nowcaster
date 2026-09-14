@@ -8,7 +8,6 @@ vs. benchmark strategies (buy-and-hold equities, 60/40).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -57,15 +56,23 @@ class Backtester:
         allocator: :class:`RegimeAllocator` instance that maps regime
             probabilities to portfolio weights.
         rebalance_freq: Rebalancing frequency (``"M"`` = monthly, etc.).
+        transaction_cost_bps: Round-trip cost per unit of turnover, in
+            basis points (default 10bp).  Charged against the L1 change
+            in weights each period.
     """
 
     def __init__(
         self,
-        allocator: Optional[RegimeAllocator] = None,
+        allocator: RegimeAllocator | None = None,
         rebalance_freq: str = "ME",
+        transaction_cost_bps: float = 10.0,
     ) -> None:
         self._allocator = allocator or RegimeAllocator()
         self._rebalance_freq = rebalance_freq
+        # Round-trip cost per unit of turnover, in basis points.  Applied
+        # to the L1 change in weights at each rebalance.  Set to 0.0 to
+        # reproduce the previous cost-free behaviour.
+        self.transaction_cost_bps = transaction_cost_bps
 
     # ------------------------------------------------------------------
     # Public interface
@@ -105,6 +112,15 @@ class Backtester:
 
         # Portfolio returns: shift weights by 1 (invest at start of period)
         port_rets = (weights_df.shift(1) * rets_aligned).sum(axis=1)
+
+        # Charge transaction costs on rebalancing.  A regime strategy that
+        # flips between 60/20/15/5 and 15/50/5/30 turns over most of the
+        # book at a switch, so leaving this out materially overstates the
+        # strategy while flattering it relative to buy-and-hold, which
+        # trades nothing.
+        traded = weights_df.diff().abs().sum(axis=1).fillna(0.0)
+        costs = traded * self.transaction_cost_bps / 10_000.0
+        port_rets = port_rets - costs
 
         # Compute metrics
         equity_curve = (1 + port_rets).cumprod()
@@ -190,7 +206,7 @@ class Backtester:
     def plot_equity_curves(
         self,
         strategy_result: BacktestResult,
-        benchmark_results: Optional[dict[str, BacktestResult]] = None,
+        benchmark_results: dict[str, BacktestResult] | None = None,
     ) -> None:
         """Plot equity curves using matplotlib.
 

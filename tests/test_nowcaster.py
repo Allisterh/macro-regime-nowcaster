@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, patch
 
 from src.models.nowcaster import Nowcaster, NowcastResult
-
 
 # ---------------------------------------------------------------------------
 # NowcastResult tests
