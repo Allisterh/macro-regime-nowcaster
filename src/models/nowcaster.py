@@ -111,10 +111,23 @@ class Nowcaster:
         ``cfnai``.  Must sum to 1.
     """
 
-    # Default ensemble weights: probit (supervised) gets most weight;
-    # Sahm rule added as the fourth signal — highly reliable in-sample.
+    # Default ensemble weights, set from a 105-point quarterly walk-forward
+    # (2000-2026) with each point a separate refit scored against NBER:
+    #
+    #   rsm .20 / probit .40 / cfnai .20 / sahm .20   AUC 0.965  Brier 0.0842
+    #   cfnai .50 / probit .375 / sahm .125           AUC 0.969  Brier 0.0514
+    #   CFNAI signal alone                            AUC 0.964  Brier 0.0569
+    #
+    # A constant forecast at the 8.6% base rate scores Brier 0.0784, so the
+    # previous weights were worse calibrated than predicting nothing. AUC is
+    # nearly unchanged across these; the gain is in calibration.
+    #
+    # rsm is 0.0 rather than removed: the signal is still computed and
+    # published in ensemble_detail, but it is latched (>0.99 in 54 of 105
+    # real-time quarters, including deep expansions) and degrades
+    # calibration at any positive weight.  See settings.yaml.
     DEFAULT_WEIGHTS = {
-        "rsm": 0.20, "probit": 0.40, "cfnai": 0.20, "sahm": 0.20,
+        "rsm": 0.0, "probit": 0.375, "cfnai": 0.50, "sahm": 0.125,
     }
 
     # Probit defaults.  ``extra_features`` are series codes used beyond

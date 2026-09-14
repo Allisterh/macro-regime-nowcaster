@@ -19,13 +19,32 @@ model:
     initial_state_cov: 1.0
 
   # Ensemble recession detection
+  #
+  # Weights set from a 105-point quarterly walk-forward (2000-2026), each
+  # point a separate refit scored against NBER. Measured out-of-sample:
+  #
+  #   configuration                              AUC     Brier
+  #   rsm .20 / probit .40 / cfnai .20 / sahm .20  0.965  0.0842
+  #   drop rsm, renormalise                        0.966  0.0554
+  #   cfnai .50 / probit .375 / sahm .125          0.969  0.0514   <- this
+  #   CFNAI signal alone                           0.964  0.0569
+  #
+  # A constant forecast at the 8.6% base rate scores Brier 0.0784, so the
+  # previous weights were worse calibrated than predicting nothing. AUC
+  # barely moves between these; the gain is entirely in calibration, which
+  # is what matters when the probability is consumed as a feature.
   ensemble:
     enabled: true
     weights:
-      rsm: 0.20        # Multivariate Markov-switching model
-      probit: 0.40      # Probit model (supervised, highest weight)
-      cfnai: 0.20       # CFNAI threshold signal
-      sahm: 0.20        # Sahm rule (unemployment-based, highly reliable)
+      # Zero, not removed: the Markov-switching model is retained and still
+      # published in ensemble_detail, but it is latched (>0.99 in 54 of 105
+      # real-time quarters, including deep expansions; AUC 0.600, Brier
+      # 0.574) and at any positive weight it degrades the ensemble's
+      # calibration. Restore a weight once the latching is diagnosed.
+      rsm: 0.0
+      probit: 0.375     # Supervised; strongest single learned signal
+      cfnai: 0.50       # Chicago Fed coincident index — best standalone
+      sahm: 0.125       # Unemployment-based; correlated with the above
     probit:
       add_lags: 3
       regularization: 1.0

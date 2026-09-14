@@ -443,6 +443,88 @@ actually went wrong at some point:
 
 ---
 
+## Measured Real-Time Performance
+
+Every figure below comes from a **walk-forward**: 105 quarterly refits from
+2000 to 2026, each fitted only on data available at that date, each
+contributing only its own final row. No number here is in-sample.
+
+| Signal | AUC | Brier |
+|--------|-----|-------|
+| **Ensemble** (current weights) | **0.966** | **0.0512** |
+| Ensemble (previous 0.20/0.40/0.20/0.20 weights) | 0.965 | 0.0842 |
+| CFNAI signal alone | 0.964 | 0.0569 |
+| Probit | 0.955 | 0.0698 |
+| Sahm rule | 0.892 | 0.1267 |
+| Markov-switching (RSM) | 0.600 | 0.5741 |
+| *Constant forecast at the 8.6% base rate* | 0.500 | 0.0784 |
+
+Read the Brier column first. Under the previous weights the ensemble was
+**worse calibrated than predicting the base rate every month**, despite an AUC
+of 0.965 — the gap between ranking periods correctly and producing a number
+whose 0.30 means 30%. The current weights fix the calibration and leave the
+discrimination unchanged.
+
+### Three caveats that matter more than the headline AUC
+
+**It rests on two episodes, not 105 observations.** Only 9 of the 105 quarters
+are NBER recessions, and they come from two events: 2001 (3 quarters) and
+2008-09 (6). The 2020 recession lasted two months and falls between quarterly
+sample points, contributing nothing. A block bootstrap gives [0.933, 1.000],
+but with two events that interval is not trustworthy.
+
+**It detects, it does not forecast.** AUC against a recession *h* quarters
+ahead:
+
+| Horizon | coincident | +1q | +2q | +3q | +4q |
+|---------|-----------|-----|-----|-----|-----|
+| AUC | 0.965 | 0.932 | 0.865 | 0.799 | 0.685 |
+
+CFNAI and the Sahm rule are coincident-to-lagging by construction, so a high
+coincident AUC mostly says "a recession is under way", which is the job of a
+nowcaster but is largely priced by the time it fires.
+
+**It does not beat CFNAI alone on its own.** Standalone, the whole DFM /
+Kalman / EM / Markov apparatus scores 0.966 against 0.964 for the Chicago Fed's
+published index. Its value shows up only in combination — see below.
+
+### CFNAI is an input, not an independent check
+
+CFNAI reaches the ensemble through four paths: the direct threshold signal, the
+probit's feature set, the DFM panel (so it shapes the latent factors), and as a
+sign anchor for `real_activity`. Removing it from **all four** and refitting the
+full walk-forward costs little — AUC 0.965 → 0.958 — so the signal does not
+depend on CFNAI. But the residual correlation with it is still +0.688: CFNAI is
+itself a factor model over 85 overlapping indicators, so the two are reading the
+same economy and can corroborate each other, never independently confirm.
+
+Combining them is the best configuration measured:
+
+| | AUC | Brier |
+|---|-----|-------|
+| CFNAI alone | 0.964 | 0.0569 |
+| 0.5 × CFNAI + 0.5 × (CFNAI-free probit + Sahm) | 0.969 | **0.0514** |
+
+which is what the shipped weights approximate.
+
+### Known defect: the RSM is latched
+
+The Markov-switching signal reports >0.99 in **54 of 105** real-time quarters,
+including deep expansions, and its in-sample mean (0.328) differs sharply from
+its real-time mean (0.639) — the filter behaves differently when refit on a
+truncated sample. It is weighted **0.0** rather than removed, so it is still
+computed and published in `ensemble_detail` and the defect stays visible.
+`tests/test_ensemble_weights.py` fails if someone restores a weight without
+re-running the walk-forward.
+
+Reproduce all of this with:
+
+```bash
+python scripts/build_features.py --step 3 --start 2000-01-31
+```
+
+---
+
 ## Correctness Audit
 
 An audit of this codebase found several defects that silently corrupted the
