@@ -12,12 +12,12 @@
 
 ## Overview
 
-This project implements a **real-time macroeconomic regime nowcaster** that ingests 75 economic indicators from the Federal Reserve (FRED), extracts latent factors using a mixed-frequency state-space model, and classifies the current economic regime as **expansion** or **recession** using an ensemble of four independent signals.
+This project implements a **real-time macroeconomic regime nowcaster** that ingests 75 economic indicators from the Federal Reserve (FRED), extracts latent factors using a mixed-frequency state-space model, and classifies the current economic regime as **expansion** or **recession** using a weighted ensemble of four signals.
 
 ### Key Features
 
 - **Mixed-Frequency Dynamic Factor Model** — EM algorithm + Kalman filter extracts 4 interpretable latent factors from 75 noisy macro series (daily, weekly, monthly, quarterly) via Mariano–Murasawa cumulator, with varimax rotation for factor identification
-- **Ensemble Recession Detection** — Weighted combination of four signals: Markov-switching model, supervised probit, CFNAI threshold, and Sahm rule
+- **Ensemble Recession Detection** — Weighted combination of a CFNAI threshold, a supervised probit, the Sahm rule and a Markov-switching model. The weights are set from measured out-of-sample performance, not judgement, and the components are correlated rather than independent
 - **Estrella–Mishkin Yield-Curve Probit** — Canonical NY Fed specification (12-month-ahead recession on T10Y3M) available as a standalone baseline
 - **Look-Ahead-Free Pipeline** — Expanding-window standardization, Kalman-filtered (not smoothed) factors *and* Hamilton-filtered (not Kim-smoothed) regime probabilities, ragged-edge masking with per-series publication lags, and NBER labels restricted to turning points that had actually been announced
 - **Point-in-Time Feature Generation** — `walk_forward` refits the model once per as-of date and keeps only the final row, so a feature table for a downstream model contains only values that were computable at the time; `assert_point_in_time()` enforces it
@@ -26,6 +26,32 @@ This project implements a **real-time macroeconomic regime nowcaster** that inge
 - **LLM Narrative Agent** — GPT-powered macro analyst that synthesizes quantitative signals with scraped Federal Reserve communications (FOMC minutes, Beige Book, speeches)
 - **Interactive Streamlit Dashboard** — Full visualization suite with regime probabilities, factor dynamics, allocation weights, and one-click narrative generation
 - **Regression-tested against its own failure modes** — prefix-invariance at both the pipeline and model layers, unit contracts on threshold signals, regime-orientation checks, and statistical recovery tests against simulated ground truth
+
+---
+
+### What it does, measured
+
+Everything below is from a **434-point monthly walk-forward** (1990–2026, four
+recessions), refitting at each date and reading only that fit's final row.
+Details in [Measured Real-Time Performance](#measured-real-time-performance)
+and [Is It Useful Downstream?](#is-it-useful-downstream)
+
+| | |
+|---|---|
+| Recession detection, real-time | AUC **0.944**, Brier **0.0544** |
+| …against CFNAI alone | AUC 0.947, Brier 0.0521 — **CFNAI still edges it** |
+| Forecasting 12 months out | AUC **0.597** — close to a coin flip |
+| Predicting forward equity returns | **no skill** (negative R² everywhere) |
+| Predicting forward vol / drawdown | IC **+0.37 / +0.24**, positive R² |
+| COVID, in real time | **missed** — fired the month after it ended |
+
+**Read this before building on it.** The factor machinery does not beat the
+single published index it consumes as an input. It is a coincident detector,
+not a forecaster. Its defensible value is as an interpretable decomposition of
+75 series, a point-in-time feature generator that is tested not to leak, and a
+second partly-independent read on CFNAI — not as a better recession model.
+The evaluation harness that establishes this is part of the repository, and
+reproducing any number here is a single command.
 
 ---
 
@@ -541,6 +567,15 @@ Reproduce all of it with:
 ```bash
 python scripts/build_features.py --step 1 --start 1990-01-31
 ```
+
+**This takes several hours.** It refits the DFM, RSM and probit once per
+month — 434 separate model fits — which is the whole point: a cheaper
+history would not be point-in-time. Results are cached incrementally to
+`data/features.csv.partial.csv`, so an interrupted run resumes rather than
+restarts. The generated panel is not committed (it is a build artefact and
+`data/` is gitignored), so the first run on a fresh clone has to pay this
+cost before `scripts/benchmark_features.py` will run. Use `--step 3` for a
+quicker, coarser panel while iterating.
 
 ---
 
