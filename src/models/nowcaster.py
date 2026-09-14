@@ -140,6 +140,42 @@ class Nowcaster:
         "rsm": 0.0, "probit": 0.375, "cfnai": 0.50, "sahm": 0.125,
     }
 
+    # Weights depend entirely on the horizon being forecast, and the
+    # ordering reverses across it.  CFNAI is a *coincident* index: close to
+    # unbeatable at h=0 and below chance by h=18.  The probit carries the
+    # yield-curve and credit-spread features, which lead.  Measured AUC on
+    # the monthly walk-forward:
+    #
+    #   horizon   best mix                          best   CFNAI  probit
+    #   0m        cfnai .875 / probit .125          0.956  0.947  0.919
+    #   6m        cfnai .50 / probit .375 / rsm .125 0.844  0.767  0.829
+    #   12m       probit 1.0                        0.699  0.593  0.699
+    #
+    # Weighting CFNAI at 0.50 for a 12-month question actively dilutes the
+    # only component that leads.  Note the confidence intervals overlap
+    # heavily at every horizon — with four recessions these orderings are
+    # suggestive, not established.
+    HORIZON_WEIGHTS: dict[int, dict[str, float]] = {
+        0: {"rsm": 0.0, "probit": 0.125, "cfnai": 0.875, "sahm": 0.0},
+        3: {"rsm": 0.0, "probit": 0.25, "cfnai": 0.625, "sahm": 0.125},
+        6: {"rsm": 0.125, "probit": 0.375, "cfnai": 0.50, "sahm": 0.0},
+        9: {"rsm": 0.0, "probit": 0.625, "cfnai": 0.375, "sahm": 0.0},
+        12: {"rsm": 0.0, "probit": 1.0, "cfnai": 0.0, "sahm": 0.0},
+        18: {"rsm": 0.0, "probit": 1.0, "cfnai": 0.0, "sahm": 0.0},
+    }
+
+    @classmethod
+    def weights_for_horizon(cls, horizon: int) -> dict[str, float]:
+        """Ensemble weights for the nearest tabulated horizon."""
+        if horizon in cls.HORIZON_WEIGHTS:
+            return dict(cls.HORIZON_WEIGHTS[horizon])
+        nearest = min(cls.HORIZON_WEIGHTS, key=lambda h: abs(h - horizon))
+        logger.info(
+            f"No tabulated weights for horizon {horizon}m; using the "
+            f"{nearest}m weights."
+        )
+        return dict(cls.HORIZON_WEIGHTS[nearest])
+
     # Probit defaults.  ``extra_features`` are series codes used beyond
     # the DFM factors; T10Y2Y and BAA10Y enter both at t and at
     # multi-month lags because yield-curve inversion leads recessions by
@@ -148,7 +184,15 @@ class Nowcaster:
         "add_lags": 3,
         "regularization": 1.0,
         "class_balanced": True,
-        "extra_features": ["CFNAI", "T10Y2Y", "BAA10Y"],
+        # TERM_SPREAD and CREDIT_SPREAD are reconstructed from their
+        # long-history components, so the leading block survives back to
+        # the 1950s where T10Y2Y/BAA10Y would cut the sample at 1982.
+        "extra_features": [
+            "CFNAI", "T10Y2Y", "BAA10Y", "TERM_SPREAD", "CREDIT_SPREAD",
+            "BAMLH0A0HYM2", "DRTSCILM", "PERMIT",
+        ],
+        "tune_regularization": False,
+        "calibrate": False,
     }
 
     # Factors the Markov-switching model is fitted on.  Hamilton (1989)
@@ -174,6 +218,7 @@ class Nowcaster:
         use_filtered_factors: bool = True,
         probit_config: dict | None = None,
         rsm_factors: list[str] | None = "default",
+        horizon: int = 0,
     ) -> None:
         """
         Parameters
@@ -212,7 +257,15 @@ class Nowcaster:
             "real_activity", "labor_market", "inflation", "financial_stress"
         ][:n_factors]
         self.use_ensemble = use_ensemble
-        self.ensemble_weights = ensemble_weights or self.DEFAULT_WEIGHTS.copy()
+        # Months ahead the ensemble is asked to forecast.  0 reproduces the
+        # original coincident nowcast.
+        self.horizon = int(horizon)
+        if ensemble_weights is not None:
+            self.ensemble_weights = dict(ensemble_weights)
+        elif self.horizon:
+            self.ensemble_weights = self.weights_for_horizon(self.horizon)
+        else:
+            self.ensemble_weights = self.DEFAULT_WEIGHTS.copy()
         self.probit_train_end = probit_train_end
         self.use_filtered_factors = use_filtered_factors
         # Probit hyper-parameters, overridable from settings.yaml.  These
@@ -632,17 +685,36 @@ class Nowcaster:
             else:
                 train_cutoff = _default_nber_cutoff()
 
-            common = probit_features.index.intersection(nber.index)
-            train_dates = common[common <= train_cutoff]
+            # Target: recession *self.horizon* months ahead.  With
+            # horizon=0 this is the contemporaneous label the model used
+            # to train on, which made it a detector; the lead it showed at
+            # 6-18 months was incidental, arriving through the yield-curve
+            # and credit-spread features rather than from being asked to
+            # forecast.  Shifting the label asks the question directly.
+            target = nber.shift(-self.horizon) if self.horizon else nber
+            target = target.dropna()
+
+            # A label at month t now describes month t+horizon, so the
+            # last `horizon` months of the training window would need
+            # outcomes that have not happened yet.  Pull the cutoff back.
+            effective_cutoff = train_cutoff - pd.DateOffset(months=self.horizon)
+
+            common = probit_features.index.intersection(target.index)
+            train_dates = common[common <= effective_cutoff]
             if len(train_dates) >= 30:
                 X_train = probit_features.loc[train_dates]
-                y_train = nber.loc[train_dates]
+                y_train = target.loc[train_dates]
                 self._probit = RecessionProbit(
                     add_lags=self.probit_config["add_lags"],
                     regularization=self.probit_config["regularization"],
                     class_balanced=self.probit_config["class_balanced"],
                 )
-                self._probit.fit(X_train, y_train)
+                if self.probit_config.get("tune_regularization"):
+                    self._probit.fit_regularization_cv(X_train, y_train)
+                else:
+                    self._probit.fit(X_train, y_train)
+                if self.probit_config.get("calibrate"):
+                    self._probit.fit_calibration(X_train, y_train)
 
                 # Predict for all dates.  predict_proba returns 0.5 for
                 # rows containing any NaN, so we preserve the NaN

@@ -77,6 +77,49 @@ WALK_FORWARD_PATH = Path("data/features.csv")
 _COARSE_SAMPLING_DAYS = 45
 
 
+def _rgba(hex_colour: str, alpha: float) -> str:
+    """``#rrggbb`` to an ``rgba()`` string, for translucent CI bands."""
+    h = hex_colour.lstrip("#")
+    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+@st.cache_data(show_spinner="Computing horizon curve…")
+def compute_horizon_curve():
+    """AUC vs forecast horizon for each signal, with bootstrap intervals.
+
+    Returns ``None`` when no walk-forward panel has been generated, in
+    which case the chart is replaced by instructions rather than by a
+    plot of the in-sample history — which would be the same mistake this
+    dashboard already made once.
+    """
+    panel = WALK_FORWARD_PATH
+    if not panel.exists():
+        return None
+    try:
+        from src.evaluation import horizon_auc_curve
+        from src.models.regime_backtest import get_nber_recession_indicator
+
+        frame = pd.read_csv(panel, index_col=0, parse_dates=True).sort_index()
+        labels = get_nber_recession_indicator(
+            start=str(frame.index[0].date()),
+            end=str(frame.index[-1].date()),
+        )
+        signals = {
+            "Ensemble": "p_recession",
+            "CFNAI": "signal_cfnai",
+            "Probit": "signal_probit",
+            "Sahm": "signal_sahm",
+        }
+        signals = {k: v for k, v in signals.items() if v in frame.columns}
+        if not signals:
+            return None
+        return horizon_auc_curve(frame, labels, signals, n_boot=1000)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not compute the horizon curve: {exc}")
+        return None
+
+
 @st.cache_data(show_spinner=False)
 def load_walk_forward() -> dict | None:
     """Load the precomputed point-in-time panel, if one has been generated.
@@ -605,6 +648,90 @@ else:
                 "Run `python scripts/build_features.py` to generate the "
                 "walk-forward panel and a real-time line will be overlaid here."
             )
+
+    st.markdown("---")
+
+    # ==================================================================
+    # 6b. Discrimination vs forecast horizon, with confidence intervals
+    # ==================================================================
+    st.subheader("Discrimination by Forecast Horizon")
+
+    horizon_curve = compute_horizon_curve()
+    if horizon_curve is None:
+        st.caption(
+            "Needs the walk-forward panel. Run "
+            "`python scripts/build_features.py --step 1 --start 1990-01-31`, "
+            "then this chart shows how each signal's discrimination decays "
+            "as the forecast horizon lengthens."
+        )
+    else:
+        frame = horizon_curve.to_frame()
+        fig_h = go.Figure()
+        palette = {
+            "Ensemble": "#e74c3c", "CFNAI": "#e67e22",
+            "Probit": "#3498db", "Sahm": "#9b59b6", "RSM": "#7f8c8d",
+        }
+        for signal in frame["signal"].unique():
+            sub = frame[frame["signal"] == signal].sort_values("horizon")
+            colour = palette.get(signal, "#95a5a6")
+            # Interval first, so the point estimates draw on top of it.
+            fig_h.add_trace(
+                go.Scatter(
+                    x=list(sub["horizon"]) + list(sub["horizon"])[::-1],
+                    y=list(sub["hi"]) + list(sub["lo"])[::-1],
+                    fill="toself",
+                    fillcolor=_rgba(colour, 0.13),
+                    line=dict(width=0),
+                    hoverinfo="skip",
+                    showlegend=False,
+                    name=f"{signal} CI",
+                )
+            )
+            fig_h.add_trace(
+                go.Scatter(
+                    x=sub["horizon"], y=sub["auc"],
+                    mode="lines+markers",
+                    line=dict(color=colour, width=2),
+                    marker=dict(size=7),
+                    name=signal,
+                    hovertemplate=(
+                        f"<b>{signal}</b><br>%{{x}} months ahead<br>"
+                        "AUC %{y:.3f}<extra></extra>"
+                    ),
+                )
+            )
+        # 0.5 is the no-skill line: below it, the signal is worse than a
+        # coin flip at that horizon.
+        fig_h.add_hline(
+            y=0.5, line_dash="dash", line_color="grey",
+            annotation_text="no skill",
+        )
+        fig_h.update_layout(
+            xaxis=dict(title="Forecast horizon (months ahead)"),
+            yaxis=dict(title="AUC", range=[0.1, 1.0]),
+            height=380,
+            margin=dict(l=10, r=10, t=10, b=40),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02,
+                xanchor="right", x=1,
+            ),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_h, use_container_width=True)
+
+        n_pos = int(frame["n_positive"].max())
+        st.caption(
+            "**The orderings reverse across the horizon.** CFNAI is a "
+            "*coincident* index: close to unbeatable at 0 months and below "
+            "the no-skill line by 18. The probit carries the yield-curve "
+            "and credit-spread features, so it is weaker at 0 and stronger "
+            "further out. "
+            "**Read the bands, not the lines.** They are 95% block-bootstrap "
+            f"intervals resampled over contiguous label runs, on a sample "
+            f"with {n_pos} recession months in a handful of episodes — they "
+            "overlap almost everywhere, so the orderings are suggestive "
+            "rather than established."
+        )
 
     st.markdown("---")
 
