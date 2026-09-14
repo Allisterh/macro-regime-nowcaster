@@ -5,16 +5,23 @@ Ties :class:`DataPipeline`, :class:`DynamicFactorModel`, and
 returns a :class:`NowcastResult`.
 
 When ``use_ensemble=True`` (the default), recession detection combines
-four independent signals:
+four signals:
 
-1. **Multivariate RSM** — Markov-switching model on all DFM factors
+1. **CFNAI signal** — Chicago Fed MA3 < −0.7 convention, on the published
+   index rather than the standardised panel column
 2. **Probit model** — supervised probit trained on NBER recession dates
-   using DFM factors, CFNAI, and yield-curve spread
-3. **CFNAI signal** — Chicago Fed MA3 < −0.7 convention
-4. **Sahm rule** — 3-month MA of UNRATE minus 12-month min ≥ 0.50pp
+   (restricted to labels the NBER had actually announced) using DFM
+   factors, CFNAI, and yield-curve and credit spreads
+3. **Sahm rule** — 3-month MA of UNRATE minus 12-month min ≥ 0.50pp, on
+   the unemployment level in percentage points
+4. **Multivariate RSM** — Markov-switching on the cyclical DFM factors.
+   Currently weighted 0.0; see ``DEFAULT_WEIGHTS``.
 
-The ensemble probability is a weighted average, with the probit model
-receiving the highest weight because it is the only supervised component.
+The ensemble probability is a weighted average.  The weights are not a
+judgement call: they were set from a 434-point monthly walk-forward over
+four recessions, scoring each candidate out-of-sample.  They are *not*
+ordered by how principled each component looks — the simple CFNAI
+threshold carries the most weight because it measured best.
 """
 
 from __future__ import annotations
@@ -111,21 +118,24 @@ class Nowcaster:
         ``cfnai``.  Must sum to 1.
     """
 
-    # Default ensemble weights, set from a 105-point quarterly walk-forward
-    # (2000-2026) with each point a separate refit scored against NBER:
+    # Default ensemble weights, set from a 434-point monthly walk-forward
+    # (1990-2026) covering four recessions, each point a separate refit
+    # scored against NBER:
     #
-    #   rsm .20 / probit .40 / cfnai .20 / sahm .20   AUC 0.965  Brier 0.0842
-    #   cfnai .50 / probit .375 / sahm .125           AUC 0.969  Brier 0.0514
-    #   CFNAI signal alone                            AUC 0.964  Brier 0.0569
+    #   cfnai .50 / probit .375 / sahm .125   AUC 0.944  Brier 0.0544
+    #   ...with rsm at .10                    AUC 0.931  Brier 0.0609
+    #   ...with rsm at .20                    AUC 0.924  Brier 0.0736
+    #   CFNAI signal alone                    AUC 0.947  Brier 0.0521
     #
-    # A constant forecast at the 8.6% base rate scores Brier 0.0784, so the
-    # previous weights were worse calibrated than predicting nothing. AUC is
-    # nearly unchanged across these; the gain is in calibration.
+    # A constant forecast at the 8.3% base rate scores Brier 0.0761.  The
+    # CFNAI signal alone still edges out the full ensemble, so the factor
+    # machinery earns its keep as a partly-independent second read rather
+    # than as a standalone detector.
     #
     # rsm is 0.0 rather than removed: the signal is still computed and
-    # published in ensemble_detail, but it is latched (>0.99 in 54 of 105
-    # real-time quarters, including deep expansions) and degrades
-    # calibration at any positive weight.  See settings.yaml.
+    # published in ensemble_detail.  The regime-ordering bug behind its
+    # latching is fixed, but it still reports 42.5% recession probability
+    # during expansions and degrades the ensemble at any positive weight.
     DEFAULT_WEIGHTS = {
         "rsm": 0.0, "probit": 0.375, "cfnai": 0.50, "sahm": 0.125,
     }

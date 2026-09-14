@@ -20,27 +20,29 @@ model:
 
   # Ensemble recession detection
   #
-  # Weights set from a 105-point quarterly walk-forward (2000-2026), each
-  # point a separate refit scored against NBER. Measured out-of-sample:
+  # Weights set from a 434-point monthly walk-forward (1990-2026) covering
+  # four recessions, each point a separate refit scored against NBER.
+  # Measured out-of-sample:
   #
   #   configuration                              AUC     Brier
-  #   rsm .20 / probit .40 / cfnai .20 / sahm .20  0.965  0.0842
-  #   drop rsm, renormalise                        0.966  0.0554
-  #   cfnai .50 / probit .375 / sahm .125          0.969  0.0514   <- this
-  #   CFNAI signal alone                           0.964  0.0569
+  #   cfnai .50 / probit .375 / sahm .125          0.944  0.0544   <- this
+  #   ...with rsm at .10                           0.931  0.0609
+  #   ...with rsm at .20                           0.924  0.0736
+  #   CFNAI signal alone                           0.947  0.0521
   #
-  # A constant forecast at the 8.6% base rate scores Brier 0.0784, so the
-  # previous weights were worse calibrated than predicting nothing. AUC
-  # barely moves between these; the gain is entirely in calibration, which
-  # is what matters when the probability is consumed as a feature.
+  # A constant forecast at the 8.3% base rate scores Brier 0.0761. Note
+  # the CFNAI signal alone still edges out the full ensemble: the factor
+  # machinery is not earning its keep as a standalone detector, only as a
+  # partly-independent second read. See README, Measured Real-Time
+  # Performance.
   ensemble:
     enabled: true
     weights:
       # Zero, not removed: the Markov-switching model is retained and still
-      # published in ensemble_detail, but it is latched (>0.99 in 54 of 105
-      # real-time quarters, including deep expansions; AUC 0.600, Brier
-      # 0.574) and at any positive weight it degrades the ensemble's
-      # calibration. Restore a weight once the latching is diagnosed.
+      # published in ensemble_detail. The regime-ordering bug behind its
+      # latching is fixed (AUC 0.600 -> 0.714, latching 51% -> 35% of
+      # months), but it still reports 42.5% recession probability during
+      # expansions and degrades the ensemble at any positive weight.
       rsm: 0.0
       probit: 0.375     # Supervised; strongest single learned signal
       cfnai: 0.50       # Chicago Fed coincident index — best standalone

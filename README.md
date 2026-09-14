@@ -445,82 +445,100 @@ actually went wrong at some point:
 
 ## Measured Real-Time Performance
 
-Every figure below comes from a **walk-forward**: 105 quarterly refits from
-2000 to 2026, each fitted only on data available at that date, each
-contributing only its own final row. No number here is in-sample.
+Every figure below comes from a **walk-forward**: 434 monthly refits from 1990
+to 2026, each fitted only on data available at that date and contributing only
+its own final row. No number here is in-sample.
+
+The sample covers **four** recessions (1990-91, 2001, 2007-09, 2020) and 36
+recession months out of 434.
 
 | Signal | AUC | Brier |
 |--------|-----|-------|
-| **Ensemble** (current weights) | **0.966** | **0.0512** |
-| Ensemble (previous 0.20/0.40/0.20/0.20 weights) | 0.965 | 0.0842 |
-| CFNAI signal alone | 0.964 | 0.0569 |
-| Probit | 0.955 | 0.0698 |
-| Sahm rule | 0.892 | 0.1267 |
-| Markov-switching (RSM) | 0.600 | 0.5741 |
-| *Constant forecast at the 8.6% base rate* | 0.500 | 0.0784 |
+| CFNAI signal alone | **0.947** | **0.0521** |
+| **Ensemble** (current weights) | 0.944 | 0.0544 |
+| Probit | 0.919 | 0.0855 |
+| Sahm rule | 0.841 | 0.1432 |
+| Markov-switching (RSM) | 0.714 | 0.3937 |
+| *Constant forecast at the 8.3% base rate* | 0.500 | 0.0761 |
 
-Read the Brier column first. Under the previous weights the ensemble was
-**worse calibrated than predicting the base rate every month**, despite an AUC
-of 0.965 — the gap between ranking periods correctly and producing a number
-whose 0.30 means 30%. The current weights fix the calibration and leave the
-discrimination unchanged.
+### What this does and does not support
 
-### Three caveats that matter more than the headline AUC
+**The ensemble still does not beat CFNAI alone.** 0.944 / 0.0544 against
+0.947 / 0.0521. The Chicago Fed publishes that index for free. On this
+evidence the DFM, Kalman filter, EM and Markov-switching machinery is not
+earning its keep as a *recession detector* — its value is as a factor
+extractor and as a second, partly-independent read (see below).
 
-**It rests on two episodes, not 105 observations.** Only 9 of the 105 quarters
-are NBER recessions, and they come from two events: 2001 (3 quarters) and
-2008-09 (6). The 2020 recession lasted two months and falls between quarterly
-sample points, contributing nothing. A block bootstrap gives [0.933, 1.000],
-but with two events that interval is not trustworthy.
+**It detects; it does not forecast.** AUC against a recession *h* months ahead:
 
-**It detects, it does not forecast.** AUC against a recession *h* quarters
-ahead:
+| Horizon | 0m | 3m | 6m | 9m | 12m |
+|---------|----|----|----|----|-----|
+| AUC | 0.944 | 0.916 | 0.820 | 0.742 | 0.597 |
 
-| Horizon | coincident | +1q | +2q | +3q | +4q |
-|---------|-----------|-----|-----|-----|-----|
-| AUC | 0.965 | 0.932 | 0.865 | 0.799 | 0.685 |
+At a one-year horizon it is close to a coin flip. For any use that needs
+warning rather than confirmation, this is the number that matters.
 
-CFNAI and the Sahm rule are coincident-to-lagging by construction, so a high
-coincident AUC mostly says "a recession is under way", which is the job of a
-nowcaster but is largely priced by the time it fires.
+**Per-episode detection is uneven, and COVID was missed outright:**
 
-**It does not beat CFNAI alone on its own.** Standalone, the whole DFM /
-Kalman / EM / Markov apparatus scores 0.966 against 0.964 for the Chicago Fed's
-published index. Its value shows up only in combination — see below.
+| Recession | Months | Detected | First signal | Peak |
+|-----------|--------|----------|--------------|------|
+| 1990-07 – 1991-02 | 8 | 3/8 | +5 months | 0.72 |
+| 2001-03 – 2001-10 | 8 | 8/8 | +0 months | 0.73 |
+| 2007-12 – 2009-05 | 18 | 12/18 | +4 months | 1.00 |
+| 2020-02 – 2020-03 | 2 | **0/2** | fired 2020-04, *after it ended* | 0.10 |
+
+False alarms are rare — 11 of 398 expansion months (2.8%) — so the model is
+conservative rather than trigger-happy. But a typical detection lag of 4-5
+months, and a complete miss on a two-month shock, bound what this can be used
+for. The COVID miss is not a bug: publication lags mean March 2020 data did not
+exist in March 2020, and a monthly macro panel physically cannot resolve a
+two-month exogenous shock. It is a structural limit of the approach.
 
 ### CFNAI is an input, not an independent check
 
 CFNAI reaches the ensemble through four paths: the direct threshold signal, the
 probit's feature set, the DFM panel (so it shapes the latent factors), and as a
-sign anchor for `real_activity`. Removing it from **all four** and refitting the
-full walk-forward costs little — AUC 0.965 → 0.958 — so the signal does not
-depend on CFNAI. But the residual correlation with it is still +0.688: CFNAI is
-itself a factor model over 85 overlapping indicators, so the two are reading the
-same economy and can corroborate each other, never independently confirm.
+sign anchor for `real_activity`. Removing it from **all four** and refitting
+costs little, so the signal does not depend on it — but the residual
+correlation is still +0.688. CFNAI is itself a factor model over 85 overlapping
+indicators, so the two read the same economy. They corroborate; they cannot
+independently confirm. Combining them is the best configuration measured, which
+is what the shipped weights approximate.
 
-Combining them is the best configuration measured:
+### The RSM: fixed, improved, still not weighted
 
-| | AUC | Brier |
-|---|-----|-------|
-| CFNAI alone | 0.964 | 0.0569 |
-| 0.5 × CFNAI + 0.5 × (CFNAI-free probit + Sahm) | 0.969 | **0.0514** |
+The Markov-switching signal used to report >0.99 in half of all real-time
+fits, including deep expansions. The cause was the regime sort: it ranked
+regimes by the *first* factor only, so when `real_activity` and `labor_market`
+disagreed about which regime was weaker, the labels inverted. Fitting as of
+July 2019 gave
 
-which is what the shipped weights approximate.
+    regime A: real_activity -0.23, labor_market +1.05   (composite +0.41)
+    regime B: real_activity +0.14, labor_market -0.66   (composite -0.26)
 
-### Known defect: the RSM is latched
+and dim-0 ordering called A "recession" although it was the *stronger* state —
+so with labour running hot the model reported P(recession) = 0.999 through a
+late-cycle expansion. Ranking on the composite mean across all fitted
+dimensions fixes it (that 2019 fit goes from 0.999 to 0.001), and a warning now
+fires when the dimensions disagree.
 
-The Markov-switching signal reports >0.99 in **54 of 105** real-time quarters,
-including deep expansions, and its in-sample mean (0.328) differs sharply from
-its real-time mean (0.639) — the filter behaves differently when refit on a
-truncated sample. It is weighted **0.0** rather than removed, so it is still
-computed and published in `ensemble_detail` and the defect stays visible.
-`tests/test_ensemble_weights.py` fails if someone restores a weight without
-re-running the walk-forward.
+The fix helped materially — AUC 0.600 → 0.714, latching 51% → 35% of months —
+but the signal still does not earn a weight:
 
-Reproduce all of this with:
+| RSM weight | Ensemble AUC | Ensemble Brier |
+|------------|--------------|----------------|
+| **0.00 (shipped)** | **0.944** | **0.0544** |
+| 0.10 | 0.931 | 0.0609 |
+| 0.20 | 0.924 | 0.0736 |
+
+It still reports 42.5% recession probability during expansions. It stays at
+0.0, now on stronger evidence; `tests/test_ensemble_weights.py` fails if the
+weight is restored without re-running this evaluation.
+
+Reproduce all of it with:
 
 ```bash
-python scripts/build_features.py --step 3 --start 2000-01-31
+python scripts/build_features.py --step 1 --start 1990-01-31
 ```
 
 ---

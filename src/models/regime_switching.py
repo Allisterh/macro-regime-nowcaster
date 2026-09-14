@@ -756,10 +756,45 @@ class RegimeSwitchingModel:
         # Use best result across restarts
         means, covs, P, smoothed, filtered = best_state  # type: ignore[misc]
 
-        # --- Sort regimes by ascending mean of first dimension ---
-        order = np.argsort(means[:, 0])
+        # --- Sort regimes by ascending composite mean across ALL dims ---
+        # Ordering on means[:, 0] alone identified the "recession" regime
+        # by the first factor only.  When the fitted factors disagree in
+        # sign — which happens on some training windows — that produced a
+        # regime labelled recessionary on the strength of one coordinate
+        # while the others said the opposite.  Fitting as of 2019-07, for
+        # instance, gave regime means
+        #
+        #   regime 0: real_activity -0.23, labor_market +1.05
+        #   regime 1: real_activity +0.14, labor_market -0.66
+        #
+        # so dim-0 ordering called regime 0 "recession" even though it was
+        # the *strong labour* state.  With labour then running hot, the
+        # filter sat in regime 0 and the model reported P(recession) 0.999
+        # through a late-cycle expansion.  Averaging over the fitted
+        # dimensions makes the ordering reflect the whole state vector.
+        #
+        # This assumes the factors are oriented so that higher means a
+        # stronger economy, which the DFM's loading-sum sign convention
+        # and its anchor series provide for the cyclical block the RSM is
+        # fitted on by default (real_activity, labor_market).
+        regime_score = means.mean(axis=1)
+        order = np.argsort(regime_score)
+
+        # A split whose coordinates disagree about which regime is weaker
+        # is not cleanly cyclical; say so rather than silently ranking it.
+        per_dim_order = [tuple(np.argsort(means[:, d])) for d in range(D)]
+        if len(set(per_dim_order)) > 1:
+            logger.warning(
+                f"RSM regime ordering is ambiguous: the fitted dimensions "
+                f"disagree about which regime is weaker "
+                f"(per-dimension orderings {per_dim_order}). Ranking on the "
+                f"composite mean {np.round(regime_score, 3).tolist()}; the "
+                f"regime split may not be a business-cycle split."
+            )
+
         means = means[order]
         covs = covs[order]
+        regime_score = regime_score[order]
         P = P[np.ix_(order, order)]
         smoothed = smoothed[:, order]
         filtered = filtered[:, order]
@@ -781,7 +816,11 @@ class RegimeSwitchingModel:
                 f"{avg_occ.min():.3f}. Regime probabilities may be unreliable."
             )
 
-        self._means = means[:, 0]
+        # ``_means`` is the scalar the regimes are ranked by, so it stays
+        # ascending by construction; the full mean vectors are in
+        # ``_means_mv``.  It was means[:, 0], which after a composite sort
+        # would no longer be ordered.
+        self._means = regime_score
         self._variances = np.array([covs[k][0, 0] for k in range(K)])
         self._means_mv = means
         self._covs_mv = covs

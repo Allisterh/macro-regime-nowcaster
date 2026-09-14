@@ -210,3 +210,80 @@ def test_probabilities_are_not_saturated():
         f"Only {interior:.1%} of probabilities lie strictly inside "
         f"[0.05, 0.95]; the signal has collapsed to a step function"
     )
+
+
+# ---------------------------------------------------------------------------
+# Multivariate ordering across disagreeing dimensions
+# ---------------------------------------------------------------------------
+
+
+def test_ordering_uses_all_dimensions_not_just_the_first():
+    """Regime ranking must reflect the whole state vector.
+
+    Ordering on ``means[:, 0]`` alone identified the recession regime by
+    the first factor only.  When the fitted factors disagree about which
+    regime is weaker, dim-0 ordering can invert the labelling.
+
+    Fitting the real panel as of July 2019 produced exactly that:
+
+        regime A: real_activity -0.23, labor_market +1.05   (composite +0.41)
+        regime B: real_activity +0.14, labor_market -0.66   (composite -0.26)
+
+    dim-0 ranked A first and so called it "recession", even though A is
+    the *stronger* state overall.  With labour running hot the filter sat
+    in A and the model reported P(recession) = 0.999 through a late-cycle
+    expansion.
+
+    This reproduces that disagreement: the truly weak state is strong on
+    dim 0 and weak on dim 1, so a dim-0 rule inverts the labels while a
+    composite rule gets them right.
+    """
+    rng = np.random.default_rng(17)
+    T, D = 500, 2
+    P = np.array([[0.93, 0.07], [0.04, 0.96]])
+
+    # State 0 is the genuine recession: weaker overall (composite -0.25),
+    # but *higher* than state 1 on dim 0.  A dim-0 sort therefore ranks
+    # state 1 first and mislabels it.
+    means = np.array([
+        [0.15, -0.65],   # state 0 — truly weak  (composite -0.250)
+        [-0.25, 1.05],   # state 1 — truly strong (composite +0.400)
+    ])
+    assert means[0].mean() < means[1].mean()      # composite: 0 is weaker
+    assert means[0, 0] > means[1, 0]              # dim 0 disagrees
+
+    states = np.zeros(T, dtype=int)
+    states[0] = 1
+    for t in range(1, T):
+        states[t] = rng.choice(2, p=P[states[t - 1]])
+
+    obs = means[states] + rng.standard_normal((T, D)) * 0.45
+    idx = pd.date_range("1990-01-31", periods=T, freq="ME")
+    data = pd.DataFrame(obs, index=idx, columns=["real_activity", "labor_market"])
+    truth = pd.Series((states == 0).astype(float), index=idx)
+
+    model = RegimeSwitchingModel(
+        n_regimes=2, regime_labels=["recession", "expansion"],
+        multivariate=True, n_restarts=3,
+    ).fit(data)
+
+    # The regime ranked first must be the one that is weaker overall.
+    assert model._means_mv[0].mean() < model._means_mv[1].mean(), (
+        "regime 0 is not the weaker state overall: "
+        f"{np.round(model._means_mv, 3).tolist()}"
+    )
+
+    corr = model.get_recession_probability().corr(truth)
+    assert corr > 0.5, (
+        f"P(recession) correlates {corr:+.3f} with the truly weak state; "
+        f"regime means are {np.round(model._means_mv, 3).tolist()}"
+    )
+
+
+def test_means_attribute_is_the_ranking_key():
+    """``_means`` must stay ascending — it is what the sort is based on."""
+    data, _ = _simulate_markov_chain()
+    model = RegimeSwitchingModel(
+        n_regimes=2, regime_labels=["recession", "expansion"], n_restarts=1,
+    ).fit(data)
+    assert model._means[0] < model._means[-1]
