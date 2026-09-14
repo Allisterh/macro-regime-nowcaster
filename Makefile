@@ -1,4 +1,4 @@
-.PHONY: install install-dev test test-all features verify-features lint format fetch-data train nowcast dashboard clean
+.PHONY: install install-dev test test-all features verify-features benchmark lint format fetch-data train nowcast dashboard clean
 
 # Install production dependencies
 install:
@@ -24,6 +24,10 @@ features:
 # Verify the feature panel is point-in-time (no future data in history)
 verify-features:
 	python scripts/build_features.py --verify
+
+# Benchmark the regime features against CFNAI on a downstream equity task
+benchmark:
+	python scripts/benchmark_features.py
 
 # Lint code
 lint:

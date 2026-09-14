@@ -347,6 +347,7 @@ macro-regime-nowcaster/
 │   │   ├── regime_backtest.py     # NBER backtesting + announcement-lagged labels
 │   │   ├── walk_forward.py        # Point-in-time feature generation for downstream ML
 │   │   └── nowcaster.py           # End-to-end 4-signal ensemble orchestrator
+│   ├── evaluation/                # Purged + embargoed CV splitter
 │   ├── allocation/                # RegimeAllocator, Backtester
 │   ├── agent/                     # NarrativeAgent (GPT), FedScraper, prompts
 │   ├── dashboard/                 # Streamlit app (8 panels)
@@ -355,7 +356,7 @@ macro-regime-nowcaster/
 ├── notebooks/                     # 5 Jupyter notebooks (EDA → full pipeline)
 ├── .github/workflows/tests.yml    # CI: fast suite on push, slow suite on PR
 ├── scripts/                       # CLI: fetch, train, nowcast, backtest, validate,
-│                                  #   build_features (point-in-time panel)
+│                                  #   build_features, benchmark_features
 ├── docs/images/                   # README visualizations
 ├── pyproject.toml
 ├── requirements.txt
@@ -539,6 +540,58 @@ Reproduce all of it with:
 
 ```bash
 python scripts/build_features.py --step 1 --start 1990-01-31
+```
+
+---
+
+## Is It Useful Downstream?
+
+The reason to build this rather than read CFNAI off the Chicago Fed website
+is that its output should be worth more than the free index it is partly built
+from. `scripts/benchmark_features.py` tests that directly, on three-month
+forward NASDAQ targets, under purged and embargoed walk-forward CV.
+
+Two rules make it honest: features are joined on **`knowable_at`**, not the
+reference month, and folds are **purged and embargoed** — on a target built
+from overlapping forward windows, shuffled k-fold reports ~+0.69 correlation
+where the truth is zero (`tests/test_purged_cv.py` asserts this).
+
+Ridge, 4 folds, 434 monthly observations. IC is the mean fold correlation;
+R² is measured against the *training* mean, the naive forecast actually
+available at prediction time.
+
+| Feature set | return IC | return R² | vol IC | vol R² | drawdown IC | drawdown R² |
+|---|---|---|---|---|---|---|
+| CFNAI only | −0.02 | −0.02 | **+0.40** | **+0.04** | **+0.26** | **+0.02** |
+| p_recession only | −0.04 | −0.04 | +0.37 | +0.01 | +0.24 | +0.01 |
+| regime signals (4) | +0.10 | −0.12 | +0.07 | −0.25 | +0.07 | −0.17 |
+| factors only | +0.01 | −0.28 | +0.08 | −0.51 | −0.00 | −0.25 |
+| full regime panel | +0.07 | −0.52 | −0.07 | −1.09 | −0.10 | −0.62 |
+
+**Returns are not predictable here.** Every R² is negative — no configuration
+beats predicting the historical average. This is consistent with the 0.597
+twelve-month AUC above, and it is the expected result: a coincident recession
+signal tells you about a drawdown that has largely already happened.
+
+**Risk is modestly predictable.** Volatility and drawdown both show positive
+out-of-sample R² and IC around +0.25 to +0.40. This is the use the signal
+actually supports — vol targeting, drawdown control, regime-conditional
+sizing — not directional forecasting.
+
+**Fewer features win, decisively.** A single column beats the full 32-column
+panel on every target, and the full panel is catastrophic for volatility
+(R² −1.09). With four folds and a handful of recessions there is not enough
+data to fit anything wide; the extra columns only add variance.
+
+**CFNAI alone still edges out `p_recession`** on all three targets, though
+the gap is small (vol IC +0.40 vs +0.37). Combined with the recession-detection
+results above, the consistent finding across every test in this repository is
+that the factor machinery does not beat the single published index it uses as
+an input. Its defensible value is as an interpretable decomposition and a
+second, partly-independent read — not as a better recession detector.
+
+```bash
+python scripts/benchmark_features.py --horizon 3
 ```
 
 ---
