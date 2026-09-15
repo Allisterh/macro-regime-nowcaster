@@ -66,8 +66,13 @@ def test_no_duplicate_codes(catalogue):
 
 
 def test_recession_sensitive_codes_exist_in_catalogue(catalogue):
-    """Every recession-sensitive entry must be a series we actually fetch."""
+    """Every recession-sensitive entry must be a series we actually build.
+
+    Derived spreads count: they are computed from fetched components
+    rather than pulled from FRED, but they are real panel columns.
+    """
     known = {e["code"] for e in catalogue["series"]}
+    known |= {e["code"] for e in catalogue.get("derived_series", [])}
     listed = catalogue.get("recession_sensitive_series", [])
     unknown = [c for c in listed if c not in known]
     assert not unknown, (
@@ -116,3 +121,37 @@ def test_all_codes_resolve_on_fred(catalogue):
         except Exception:
             bad.append(entry["code"])
     assert not bad, f"series ids that do not exist on FRED: {bad}"
+
+
+# ---------------------------------------------------------------------------
+# Derived series
+# ---------------------------------------------------------------------------
+
+
+def test_derived_series_components_are_fetched(catalogue):
+    """A derived spread is useless if its components are not in `series`."""
+    fetched = {e["code"] for e in catalogue["series"]}
+    for entry in catalogue.get("derived_series", []):
+        for role in ("minuend", "subtrahend"):
+            assert entry[role] in fetched, (
+                f"{entry['code']} needs {entry[role]}, which is not in the "
+                f"series catalogue and so is never fetched"
+            )
+
+
+def test_derived_series_have_required_fields(catalogue):
+    required = {"code", "name", "minuend", "subtrahend", "transform",
+                "publication_lag_days"}
+    for entry in catalogue.get("derived_series", []):
+        missing = required - set(entry)
+        assert not missing, f"{entry.get('code', entry)} is missing {missing}"
+
+
+def test_derived_codes_do_not_collide_with_fetched_codes(catalogue):
+    """A derived column must not silently overwrite a fetched series."""
+    fetched = {e["code"] for e in catalogue["series"]}
+    for entry in catalogue.get("derived_series", []):
+        assert entry["code"] not in fetched, (
+            f"{entry['code']} is both fetched and derived; the derived "
+            f"value would overwrite the fetched one"
+        )

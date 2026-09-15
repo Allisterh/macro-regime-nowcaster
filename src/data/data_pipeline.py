@@ -67,10 +67,21 @@ class DataPipeline:
         # models *what* the number said at the time.  Backtests need both.
         self.use_vintages = use_vintages
         self._series_cfg = self._load_series_config(self.series_config_path)
+        self._derived_cfg = self._load_derived_config(self.series_config_path)
         # Monthly-aligned, *untransformed* levels for the series whose
         # signals are defined on published units (see RAW_LEVEL_SERIES).
         # Populated by run(); None until then.
         self.raw_levels_: pd.DataFrame | None = None
+
+    @property
+    def derived_config(self) -> list[dict]:
+        """Derived-series entries, empty when none are configured.
+
+        Resolved defensively: pipelines are sometimes built via
+        ``__new__`` with attributes assigned by hand, and a new optional
+        config block should not break those.
+        """
+        return getattr(self, "_derived_cfg", []) or []
 
     # ------------------------------------------------------------------
     # Public API
@@ -93,6 +104,7 @@ class DataPipeline:
 
         raw = self._fetch_all(end_date)
         aligned = self._align_monthly(raw)
+        aligned = self._add_derived(aligned)
 
         # Keep untransformed levels for threshold-based signals *before*
         # the transform/standardise step destroys their units.
@@ -108,7 +120,7 @@ class DataPipeline:
         if self.apply_publication_lags:
             series_lags = {
                 entry["code"]: int(entry.get("publication_lag_days", 0))
-                for entry in self._series_cfg
+                for entry in (self._series_cfg + self.derived_config)
             }
             transformed = ragged_edge_mask(
                 transformed,
@@ -155,6 +167,16 @@ class DataPipeline:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _load_derived_config(path: str | Path) -> list[dict]:
+        """Read the ``derived_series`` block, if present."""
+        config_path = Path(path)
+        if not config_path.exists():
+            return []
+        with config_path.open(encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        return data.get("derived_series", [])
+
+    @staticmethod
     def _load_series_config(path: str | Path) -> list[dict]:
         """Read the YAML series catalogue and return a list of dicts."""
         config_path = Path(path)
@@ -193,6 +215,40 @@ class DataPipeline:
                 logger.warning(f"Could not fetch {code}: {exc}")
         return raw
 
+    def _add_derived(self, panel: pd.DataFrame) -> pd.DataFrame:
+        """Compute configured spread series from their components.
+
+        FRED publishes ready-made spreads (``T10Y3M``, ``BAA10Y``) but only
+        from 1982 and 1986 — which is precisely the leading-indicator block
+        the probit relies on, and it caps any backtest at four recessions.
+        The underlying yields go back much further (``GS10`` 1953,
+        ``TB3MS`` 1934, ``BAA``/``AAA`` 1919), so reconstructing the
+        spreads by subtraction extends the usable sample to nine
+        recessions without losing the signal.
+
+        Each entry in the YAML's ``derived_series`` block names a ``minuend``
+        and a ``subtrahend``; both must already be in the panel.
+        """
+        derived = self.derived_config
+        if not derived:
+            return panel
+
+        result = panel.copy()
+        for entry in derived:
+            code = entry["code"]
+            a, b = entry["minuend"], entry["subtrahend"]
+            if a not in result.columns or b not in result.columns:
+                logger.warning(
+                    f"Cannot derive {code}: missing {a if a not in result else b}"
+                )
+                continue
+            result[code] = result[a] - result[b]
+            logger.debug(
+                f"Derived {code} = {a} - {b} "
+                f"({int(result[code].notna().sum())} observations)"
+            )
+        return result
+
     def _align_monthly(self, raw: dict[str, pd.Series]) -> pd.DataFrame:
         """Resample all series to month-end frequency and join.
 
@@ -220,7 +276,7 @@ class DataPipeline:
         """
         code_to_transform = {
             entry["code"]: entry.get("transform", "none")
-            for entry in self._series_cfg
+            for entry in (self._series_cfg + self.derived_config)
         }
 
         min_periods = self.standardize_min_periods

@@ -30,6 +30,16 @@ from scipy.stats import norm
 _PROBA_FLOOR = 1e-3
 
 
+class _SigmoidCalibrator:
+    """Platt scaling wrapper exposing the same ``predict`` as isotonic."""
+
+    def __init__(self, model) -> None:
+        self._model = model
+
+    def predict(self, scores: np.ndarray) -> np.ndarray:
+        return self._model.predict_proba(np.asarray(scores).reshape(-1, 1))[:, 1]
+
+
 class RecessionProbit:
     """Probit regression for recession probability estimation.
 
@@ -51,6 +61,8 @@ class RecessionProbit:
         add_lags: int = 1,
         regularization: float = 0.01,
         class_balanced: bool = False,
+        max_missing_fraction: float = 0.5,
+        max_column_missing: float = 0.9,
     ) -> None:
         """
         Parameters
@@ -66,6 +78,12 @@ class RecessionProbit:
         self.add_lags = add_lags
         self.regularization = regularization
         self.class_balanced = class_balanced
+        # Rows missing more than this share of their features fall back to
+        # 0.5; below it, missing entries are imputed with training means.
+        self.max_missing_fraction = max_missing_fraction
+        # Feature columns missing more than this share of the training
+        # window are excluded from the fit rather than emptying it.
+        self.max_column_missing = max_column_missing
 
         # Fitted attributes
         self._coef: np.ndarray | None = None
@@ -74,6 +92,11 @@ class RecessionProbit:
         self._is_fitted: bool = False
         self._pos_weight: float = 1.0
         self._neg_weight: float = 1.0
+        self._train_means: np.ndarray | None = None
+        self._keep_cols: np.ndarray | None = None
+        # Monotone score -> probability map, set by fit_calibration().
+        # None means predict_proba returns the raw probit output.
+        self._calibrator = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -111,7 +134,42 @@ class RecessionProbit:
         # Build augmented feature matrix (lags + intercept)
         X_aug = self._augment_features(X_arr)
 
-        # Drop rows with NaN (from lags or original data)
+        # Drop unusable COLUMNS before unusable rows.
+        #
+        # Dropping rows first means a single feature with no data in the
+        # training window empties the entire training set: fit() raises,
+        # Nowcaster catches it, and the signal silently sits at 0.5.  That
+        # is what happened when leading indicators starting in 1990 and
+        # 2023 were added — the probit stopped training in 64% of months
+        # across 1967-2025 and nobody saw an error.
+        #
+        # A feature with (almost) nothing in the training window carries
+        # no information for this fit, so it is excluded and recorded, and
+        # predict_proba applies the same selection.
+        if X_aug.shape[0] == 0:
+            # No rows at all: the column screen below would divide by zero
+            # and report every feature as unusable, masking the clearer
+            # "too few observations" error raised further down.
+            raise ValueError(
+                "Too few valid training observations (0). Need at least 20."
+            )
+
+        col_missing = np.isnan(X_aug).mean(axis=0)
+        self._keep_cols = col_missing <= self.max_column_missing
+        if not self._keep_cols.any():
+            raise ValueError(
+                "Every feature is unusable in this window: all columns "
+                f"exceed max_column_missing={self.max_column_missing:.0%}."
+            )
+        dropped = int((~self._keep_cols).sum())
+        if dropped:
+            logger.debug(
+                f"Probit: dropping {dropped} feature column(s) with more "
+                f"than {self.max_column_missing:.0%} missing in this window"
+            )
+        X_aug = X_aug[:, self._keep_cols]
+
+        # Now drop rows with NaN among the columns we are actually using
         valid = ~(np.isnan(X_aug).any(axis=1) | np.isnan(y_arr))
         X_clean = X_aug[valid]
         y_clean = y_arr[valid]
@@ -165,6 +223,10 @@ class RecessionProbit:
 
         self._coef = result.x
         self._is_fitted = True
+        # Column means of the augmented training matrix, used to impute
+        # missing features at prediction time.  Taken from the training
+        # fold only, so this introduces no look-ahead.
+        self._train_means = np.nanmean(X_clean, axis=0)
 
         # Training diagnostics
         p_train = norm.cdf(X_clean @ self._coef)
@@ -174,7 +236,9 @@ class RecessionProbit:
 
         return self
 
-    def predict_proba(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
+    def predict_proba(
+        self, X: pd.DataFrame | np.ndarray, *, calibrated: bool = True
+    ) -> np.ndarray:
         """Return P(recession) for each observation.
 
         Parameters
@@ -199,12 +263,34 @@ class RecessionProbit:
                 X_arr = X_arr.reshape(-1, 1)
 
         X_aug = self._augment_features(X_arr)
+        if self._keep_cols is not None:
+            X_aug = X_aug[:, self._keep_cols]
 
-        # NaN-safe: return 0.5 (uninformative) for rows with any NaN
-        valid = ~np.isnan(X_aug).any(axis=1)
+        # Impute missing features with their training means rather than
+        # discarding the whole row.
+        #
+        # This used to return 0.5 whenever *any* feature was NaN, which is
+        # catastrophic with features of differing history: a row is usable
+        # only where every single one exists.  Adding leading indicators
+        # that start in 1990 and 2023 silently switched the probit off in
+        # 64% of months across 1967-2025 — it was not underperforming,
+        # it was not running.  The failure is invisible because 0.5 is a
+        # plausible-looking probability.
+        missing = np.isnan(X_aug)
+        frac_missing = missing.mean(axis=1)
+        X_filled = X_aug.copy()
+        if missing.any() and self._train_means is not None:
+            fill = np.broadcast_to(self._train_means, X_aug.shape)
+            X_filled = np.where(missing, fill, X_aug)
+
+        # A row that is mostly missing carries too little information to
+        # score, so it still falls back to the uninformative 0.5.
+        usable = (~np.isnan(X_filled).any(axis=1)) & (
+            frac_missing <= self.max_missing_fraction
+        )
         proba = np.full(X_aug.shape[0], 0.5)
-        if valid.any():
-            proba[valid] = norm.cdf(X_aug[valid] @ self._coef)
+        if usable.any():
+            proba[usable] = norm.cdf(X_filled[usable] @ self._coef)
         # Numerical guard only.  This used to clip to [0.05, 0.95], which
         # turned a near-separable in-sample fit into a step function —
         # 352 of 434 months sat at exactly 0.05 in the committed backtest,
@@ -212,6 +298,14 @@ class RecessionProbit:
         # overconfidence is a regularisation problem (see `regularization`
         # and `fit_regularization_cv`), not something to clip away.
         proba = np.clip(proba, _PROBA_FLOOR, 1.0 - _PROBA_FLOOR)
+
+        # Monotone, so ordering is preserved and discrimination is
+        # essentially unchanged (ties can nudge AUC slightly); the point
+        # is to move the values onto the observed frequency scale.
+        if calibrated and self._calibrator is not None:
+            proba = np.clip(
+                self._calibrator.predict(proba), _PROBA_FLOOR, 1.0 - _PROBA_FLOOR
+            )
         return proba
 
     def predict(
@@ -305,6 +399,84 @@ class RecessionProbit:
         )
         self.regularization = best_lambda
         return self.fit(X, y)
+
+    def fit_calibration(
+        self,
+        X: pd.DataFrame | np.ndarray,
+        y: pd.Series | np.ndarray,
+        *,
+        method: str = "isotonic",
+    ) -> RecessionProbit:
+        """Learn a monotone map from raw scores to calibrated probabilities.
+
+        A probit can rank months well while its numbers are poor
+        probabilities: measured on the walk-forward it reached AUC 0.919
+        with a Brier score of 0.0855, worse than a constant forecast at
+        the base rate.  Ranking and calibration are different properties,
+        and only the second matters when the output is consumed as a
+        probability.
+
+        Isotonic regression fits a non-decreasing step function, so it
+        cannot *reorder* predictions; it only moves them onto the observed
+        frequency scale.  Note it is non-decreasing rather than strictly
+        increasing, so it flattens ranges of scores into ties, and AUC can
+        move by a little as a result — measured at 0.795 -> 0.787 on a
+        synthetic check.  Discrimination is essentially preserved;
+        calibration is what improves.
+
+        Fit this on the *training* fold only.  Calibrating on data the
+        model is then scored against is circular.
+
+        **Measured on this project's data, this does not help, and it is
+        off by default.** Calibrating on 1990-2011 (34 recession months)
+        and scoring on 2011-2026 (2) collapsed the output onto 10 distinct
+        levels, 123 of 174 months landing on exactly 0.0. AUC fell from
+        0.660 to 0.352 — below chance, because the ordering is then decided
+        by tie-breaking — while Brier moved 0.0874 -> 0.0403, still worse
+        than the 0.0114 of a constant forecast at the test base rate. The
+        apparent gain was a move from very bad to less bad, bought by
+        predicting near-constant.
+
+        Isotonic needs many observations per step, and 34 positive events
+        do not supply them. Revisit once the sample covers more recessions;
+        ``method="sigmoid"`` is the two-parameter alternative for short
+        samples.
+
+        Parameters
+        ----------
+        method : {"isotonic", "sigmoid"}
+            Isotonic is flexible but needs a few hundred points; sigmoid
+            (Platt scaling) is a two-parameter fallback for short samples.
+        """
+        if not self._is_fitted:
+            raise RuntimeError("Fit the probit before calibrating it.")
+
+        raw = self.predict_proba(X, calibrated=False)
+        y_arr = (
+            y.values.astype(float) if isinstance(y, pd.Series)
+            else np.asarray(y, dtype=float)
+        )
+        ok = ~(np.isnan(raw) | np.isnan(y_arr))
+        if ok.sum() < 30 or len(set(y_arr[ok])) < 2:
+            logger.warning("Too few usable rows to calibrate; leaving raw.")
+            return self
+
+        if method == "isotonic":
+            from sklearn.isotonic import IsotonicRegression
+
+            self._calibrator = IsotonicRegression(
+                y_min=0.0, y_max=1.0, out_of_bounds="clip"
+            ).fit(raw[ok], y_arr[ok])
+        elif method == "sigmoid":
+            from sklearn.linear_model import LogisticRegression
+
+            lr = LogisticRegression().fit(raw[ok].reshape(-1, 1), y_arr[ok])
+            self._calibrator = _SigmoidCalibrator(lr)
+        else:
+            raise ValueError(f"Unknown calibration method {method!r}")
+
+        logger.debug(f"Probit: fitted {method} calibrator on {int(ok.sum())} rows")
+        return self
 
     def calibration_report(
         self,

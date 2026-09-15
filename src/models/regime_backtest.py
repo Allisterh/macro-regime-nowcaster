@@ -29,6 +29,15 @@ from loguru import logger
 # Source: https://www.nber.org/research/data/us-business-cycle-expansions-and-contractions
 # Format: (peak, trough) — recession spans from peak to trough (inclusive).
 NBER_RECESSIONS: list[tuple[str, str]] = [
+    # Pre-1980 turning points, needed once the panel reaches back to the
+    # 1950s via the reconstructed spreads.  These take the sample from
+    # four recessions to ten, which is the binding constraint on every
+    # confidence interval this project reports.
+    ("1953-07-01", "1954-05-01"),
+    ("1957-08-01", "1958-04-01"),
+    ("1960-04-01", "1961-02-01"),
+    ("1969-12-01", "1970-11-01"),
+    ("1973-11-01", "1975-03-01"),
     ("1980-01-01", "1980-07-01"),
     ("1981-07-01", "1982-11-01"),
     ("1990-07-01", "1991-03-01"),
@@ -44,6 +53,11 @@ NBER_RECESSIONS: list[tuple[str, str]] = [
 # the label's own timestamp is in the past.
 # Source: https://www.nber.org/research/business-cycle-dating
 NBER_ANNOUNCEMENTS: dict[str, str] = {
+    # The Business Cycle Dating Committee was only formed in 1978, so
+    # pre-1979 turning points were dated retrospectively and have no
+    # contemporaneous announcement.  They fall through to
+    # _DEFAULT_ANNOUNCE_LAG, which is the honest treatment: a forecaster
+    # in 1970 did not have an official label either.
     "1980-01-01": "1980-06-03",
     "1980-07-01": "1981-07-08",
     "1981-07-01": "1982-01-06",

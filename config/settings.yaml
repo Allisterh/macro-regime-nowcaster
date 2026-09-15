@@ -43,10 +43,10 @@ model:
       # latching is fixed (AUC 0.600 -> 0.714, latching 51% -> 35% of
       # months), but it still reports 42.5% recession probability during
       # expansions and degrades the ensemble at any positive weight.
-      rsm: 0.0
-      probit: 0.375     # Supervised; strongest single learned signal
-      cfnai: 0.50       # Chicago Fed coincident index — best standalone
-      sahm: 0.125       # Unemployment-based; correlated with the above
+      rsm: 0.0        # latched during expansions; see nowcaster.py
+      probit: 0.50    # yield curve + credit spreads + DFM factors
+      cfnai: 0.50     # Chicago Fed coincident index
+      sahm: 0.0       # correlated with the above; no marginal value at h=0
     probit:
       add_lags: 3
       regularization: 1.0

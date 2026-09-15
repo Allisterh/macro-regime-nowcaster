@@ -303,6 +303,40 @@ series:
     transform: none
     publication_lag_days: 5
 
+
+  # Long-history yield components.  FRED's ready-made spreads T10Y3M and
+  # BAA10Y only start in 1982 and 1986, which caps any backtest at four
+  # recessions — and they are exactly the leading block the probit needs.
+  # These monthly constituents go back decades further, so the spreads are
+  # reconstructed by subtraction in `derived_series` below.
+  - code: GS10
+    name: 10-Year Treasury Constant Maturity Rate (monthly, from 1953)
+    frequency: monthly
+    category: financial_conditions
+    transform: none
+    publication_lag_days: 1
+
+  - code: TB3MS
+    name: 3-Month Treasury Bill Secondary Market Rate (monthly, from 1934)
+    frequency: monthly
+    category: financial_conditions
+    transform: none
+    publication_lag_days: 1
+
+  - code: BAA
+    name: Moody's Seasoned Baa Corporate Bond Yield (from 1919)
+    frequency: monthly
+    category: financial_conditions
+    transform: none
+    publication_lag_days: 1
+
+  - code: AAA
+    name: Moody's Seasoned Aaa Corporate Bond Yield (from 1919)
+    frequency: monthly
+    category: financial_conditions
+    transform: none
+    publication_lag_days: 1
+
   # Consumer & Housing
   - code: UMCSENT
     name: University of Michigan Consumer Sentiment
@@ -548,6 +582,30 @@ series:
     transform: log_diff
     publication_lag_days: 60
 
+
+# ---------------------------------------------------------------------------
+# Derived series
+# ---------------------------------------------------------------------------
+# Spreads computed from the long-history components above, so the
+# leading-indicator block reaches back to the 1950s rather than the 1980s.
+# This is what lets the walk-forward cover nine recessions instead of four,
+# which is the binding constraint on every confidence interval this project
+# reports.  Each entry is `minuend - subtrahend`; both must be in `series`.
+derived_series:
+  - code: TERM_SPREAD
+    name: Term spread, 10-Year Treasury minus 3-Month Bill (from 1953)
+    minuend: GS10
+    subtrahend: TB3MS
+    transform: none
+    publication_lag_days: 1
+
+  - code: CREDIT_SPREAD
+    name: Credit spread, Moody's Baa minus Aaa (from 1919)
+    minuend: BAA
+    subtrahend: AAA
+    transform: none
+    publication_lag_days: 1
+
 # ---------------------------------------------------------------------------
 # Recession-sensitive series
 # ---------------------------------------------------------------------------
@@ -577,6 +635,8 @@ recession_sensitive_series:
   - T10Y3M        # 10Y−3M yield spread — alternative yield curve measure
   - BAA10Y        # BAA credit spread — widens before recessions
   - BAMLH0A0HYM2  # HY option-adjusted spread — earlier and cleaner than BAA10Y
+  - TERM_SPREAD   # 10Y-3M, reconstructed back to 1953
+  - CREDIT_SPREAD # Baa-Aaa, reconstructed back to 1919
   - NFCI          # Financial conditions index
   - VIXCLS        # VIX — fear gauge
   # Credit conditions (leading, ~6-month lead)
