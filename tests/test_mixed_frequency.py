@@ -164,3 +164,41 @@ def test_dfm_fit_without_quarterly_unchanged():
     dfm.fit(panel)
     assert dfm._is_fitted
     assert dfm.factors_.shape == (T, 2)
+
+
+# ---------------------------------------------------------------------------
+# Empty series
+# ---------------------------------------------------------------------------
+
+
+def test_to_monthly_handles_an_empty_series():
+    """An empty input is a normal condition, not an error.
+
+    A backtest as of 1985 asks for series that do not start until 1990,
+    and FRED correctly returns nothing. Raising here took down the entire
+    as-of date, which silently truncated an extended walk-forward from
+    1967 to 1996 — losing six of the ten recessions it was run to cover.
+    """
+    from src.data.mixed_frequency import _to_monthly
+
+    for freq in ("daily", "weekly", "monthly", "quarterly"):
+        empty = pd.Series(dtype=float, index=pd.DatetimeIndex([]), name="X")
+        out = _to_monthly(empty, freq)
+        assert out.empty, f"{freq}: expected an empty result"
+        assert isinstance(out.index, pd.DatetimeIndex)
+
+
+def test_align_mixed_frequency_tolerates_a_series_with_no_observations():
+    """One not-yet-existing series must not sink the whole panel."""
+    idx = pd.date_range("1985-01-31", periods=24, freq="ME")
+    raw = {
+        "PRESENT": pd.Series(range(24), index=idx, dtype=float),
+        "NOT_YET": pd.Series(dtype=float, index=pd.DatetimeIndex([])),
+    }
+    cfg = [
+        {"code": "PRESENT", "frequency": "monthly"},
+        {"code": "NOT_YET", "frequency": "quarterly"},
+    ]
+    panel = align_mixed_frequency(raw, series_config=cfg)
+    assert "PRESENT" in panel.columns
+    assert panel["PRESENT"].notna().sum() == 24

@@ -64,7 +64,20 @@ def _to_monthly(
     freq: str,
     method: str = "last",
 ) -> pd.Series:
-    """Convert a single series to monthly frequency."""
+    """Convert a single series to monthly frequency.
+
+    An empty input returns an empty monthly series rather than raising.
+    This is a normal condition, not an error: a backtest as of 1985 asks
+    for series that do not begin until 1990, and FRED correctly returns
+    nothing.  Raising here took down the whole as-of date, which silently
+    truncated an extended walk-forward to the years where every series
+    happened to exist.
+    """
+    if s.empty:
+        return pd.Series(
+            dtype=float, index=pd.DatetimeIndex([], name=s.index.name),
+            name=s.name,
+        )
     if freq in ("daily", "weekly"):
         if method == "mean":
             return s.resample("ME").mean()
@@ -84,6 +97,11 @@ def _quarterly_to_monthly(s: pd.Series) -> pd.Series:
     quarterly value only at t=3,6,9,12 and skips the NaN months via
     its standard missing-data logic.
     """
+    if s.empty:
+        return pd.Series(
+            dtype=float, index=pd.DatetimeIndex([], name=s.index.name),
+            name=s.name,
+        )
     idx = pd.date_range(
         start=s.index.min() - pd.offsets.MonthBegin(2),
         end=s.index.max(),

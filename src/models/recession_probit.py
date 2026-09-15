@@ -61,6 +61,8 @@ class RecessionProbit:
         add_lags: int = 1,
         regularization: float = 0.01,
         class_balanced: bool = False,
+        max_missing_fraction: float = 0.5,
+        max_column_missing: float = 0.9,
     ) -> None:
         """
         Parameters
@@ -76,6 +78,12 @@ class RecessionProbit:
         self.add_lags = add_lags
         self.regularization = regularization
         self.class_balanced = class_balanced
+        # Rows missing more than this share of their features fall back to
+        # 0.5; below it, missing entries are imputed with training means.
+        self.max_missing_fraction = max_missing_fraction
+        # Feature columns missing more than this share of the training
+        # window are excluded from the fit rather than emptying it.
+        self.max_column_missing = max_column_missing
 
         # Fitted attributes
         self._coef: np.ndarray | None = None
@@ -84,6 +92,8 @@ class RecessionProbit:
         self._is_fitted: bool = False
         self._pos_weight: float = 1.0
         self._neg_weight: float = 1.0
+        self._train_means: np.ndarray | None = None
+        self._keep_cols: np.ndarray | None = None
         # Monotone score -> probability map, set by fit_calibration().
         # None means predict_proba returns the raw probit output.
         self._calibrator = None
@@ -124,7 +134,42 @@ class RecessionProbit:
         # Build augmented feature matrix (lags + intercept)
         X_aug = self._augment_features(X_arr)
 
-        # Drop rows with NaN (from lags or original data)
+        # Drop unusable COLUMNS before unusable rows.
+        #
+        # Dropping rows first means a single feature with no data in the
+        # training window empties the entire training set: fit() raises,
+        # Nowcaster catches it, and the signal silently sits at 0.5.  That
+        # is what happened when leading indicators starting in 1990 and
+        # 2023 were added — the probit stopped training in 64% of months
+        # across 1967-2025 and nobody saw an error.
+        #
+        # A feature with (almost) nothing in the training window carries
+        # no information for this fit, so it is excluded and recorded, and
+        # predict_proba applies the same selection.
+        if X_aug.shape[0] == 0:
+            # No rows at all: the column screen below would divide by zero
+            # and report every feature as unusable, masking the clearer
+            # "too few observations" error raised further down.
+            raise ValueError(
+                "Too few valid training observations (0). Need at least 20."
+            )
+
+        col_missing = np.isnan(X_aug).mean(axis=0)
+        self._keep_cols = col_missing <= self.max_column_missing
+        if not self._keep_cols.any():
+            raise ValueError(
+                "Every feature is unusable in this window: all columns "
+                f"exceed max_column_missing={self.max_column_missing:.0%}."
+            )
+        dropped = int((~self._keep_cols).sum())
+        if dropped:
+            logger.debug(
+                f"Probit: dropping {dropped} feature column(s) with more "
+                f"than {self.max_column_missing:.0%} missing in this window"
+            )
+        X_aug = X_aug[:, self._keep_cols]
+
+        # Now drop rows with NaN among the columns we are actually using
         valid = ~(np.isnan(X_aug).any(axis=1) | np.isnan(y_arr))
         X_clean = X_aug[valid]
         y_clean = y_arr[valid]
@@ -178,6 +223,10 @@ class RecessionProbit:
 
         self._coef = result.x
         self._is_fitted = True
+        # Column means of the augmented training matrix, used to impute
+        # missing features at prediction time.  Taken from the training
+        # fold only, so this introduces no look-ahead.
+        self._train_means = np.nanmean(X_clean, axis=0)
 
         # Training diagnostics
         p_train = norm.cdf(X_clean @ self._coef)
@@ -214,12 +263,34 @@ class RecessionProbit:
                 X_arr = X_arr.reshape(-1, 1)
 
         X_aug = self._augment_features(X_arr)
+        if self._keep_cols is not None:
+            X_aug = X_aug[:, self._keep_cols]
 
-        # NaN-safe: return 0.5 (uninformative) for rows with any NaN
-        valid = ~np.isnan(X_aug).any(axis=1)
+        # Impute missing features with their training means rather than
+        # discarding the whole row.
+        #
+        # This used to return 0.5 whenever *any* feature was NaN, which is
+        # catastrophic with features of differing history: a row is usable
+        # only where every single one exists.  Adding leading indicators
+        # that start in 1990 and 2023 silently switched the probit off in
+        # 64% of months across 1967-2025 — it was not underperforming,
+        # it was not running.  The failure is invisible because 0.5 is a
+        # plausible-looking probability.
+        missing = np.isnan(X_aug)
+        frac_missing = missing.mean(axis=1)
+        X_filled = X_aug.copy()
+        if missing.any() and self._train_means is not None:
+            fill = np.broadcast_to(self._train_means, X_aug.shape)
+            X_filled = np.where(missing, fill, X_aug)
+
+        # A row that is mostly missing carries too little information to
+        # score, so it still falls back to the uninformative 0.5.
+        usable = (~np.isnan(X_filled).any(axis=1)) & (
+            frac_missing <= self.max_missing_fraction
+        )
         proba = np.full(X_aug.shape[0], 0.5)
-        if valid.any():
-            proba[valid] = norm.cdf(X_aug[valid] @ self._coef)
+        if usable.any():
+            proba[usable] = norm.cdf(X_filled[usable] @ self._coef)
         # Numerical guard only.  This used to clip to [0.05, 0.95], which
         # turned a near-separable in-sample fit into a step function —
         # 352 of 434 months sat at exactly 0.05 in the committed backtest,
