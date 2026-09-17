@@ -249,6 +249,12 @@ class Nowcaster:
     # every factor.
     DEFAULT_RSM_FACTORS = ["real_activity", "labor_market"]
 
+    # Minimum anchor-loading strength (relative to a factor's average
+    # loading) for its *name* to be trusted when selecting factors for
+    # the regime model.  1.0 means the anchors must load at least as
+    # strongly as a typical series on that factor.
+    MIN_FACTOR_MATCH_QUALITY = 1.0
+
     def __init__(
         self,
         pipeline: object,
@@ -558,6 +564,16 @@ class Nowcaster:
             # Convert monthly factors → quarterly averages
             factors_q = factors.resample("QE").mean().dropna()
 
+            # FRED stamps GDPC1 at the *start* of its quarter (2002-01-01)
+            # while resampling the monthly factors gives quarter *ends*
+            # (2002-03-31), so the two indexes never intersect and this
+            # calibration silently fell through to the hard-coded trend on
+            # every run.  Roll GDP onto quarter-ends before aligning.
+            gdpc1_growth = gdpc1_growth.copy()
+            gdpc1_growth.index = (
+                gdpc1_growth.index + pd.offsets.QuarterEnd(0)
+            )
+
             # Align on common quarter-end dates
             common = gdpc1_growth.index.intersection(factors_q.index)
             if len(common) < 20:
@@ -639,7 +655,41 @@ class Nowcaster:
         """
         if not self.rsm_factors:
             return factors
+
+        # Select on evidence, not on the label.  Factor names come from an
+        # assignment that always produces *some* pairing, so a name can sit
+        # on a factor its anchor series barely load on.  On the live panel
+        # "labor_market" was assigned to a factor whose strongest loadings
+        # were BAA, AAA and GS10 — bond yields — and fitting the regime
+        # model on it made the recession probability track the level of
+        # interest rates.  That is what produced a 99.9% reading while
+        # every other signal was calm.
+        quality = getattr(self._dfm, "_factor_match_quality", {}) or {}
         available = [c for c in self.rsm_factors if c in factors.columns]
+        if quality:
+            evidenced = [
+                c for c in available
+                if not np.isfinite(quality.get(c, np.nan))
+                or quality.get(c, 0.0) >= self.MIN_FACTOR_MATCH_QUALITY
+            ]
+            dropped = [c for c in available if c not in evidenced]
+            if dropped and evidenced:
+                logger.warning(
+                    f"RSM: excluding {dropped} — the name is not evidenced "
+                    f"by the loadings "
+                    f"({ {c: round(quality[c], 2) for c in dropped} }), so "
+                    f"fitting the regime model on it would track whatever "
+                    f"that factor actually measures."
+                )
+                available = evidenced
+            elif dropped:
+                logger.warning(
+                    f"RSM: none of {available} are well evidenced "
+                    f"({ {c: round(quality.get(c, float('nan')), 2) for c in available} }); "
+                    f"fitting on them anyway, and the regime labels should "
+                    f"not be read literally."
+                )
+
         if not available:
             logger.warning(
                 f"None of rsm_factors={self.rsm_factors} are present in "

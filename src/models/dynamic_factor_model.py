@@ -96,6 +96,14 @@ def _varimax(loadings: np.ndarray, max_iter: int = 500, tol: float = 1e-8) -> tu
     p, k = loadings.shape
     if k < 2:
         return loadings.copy(), np.eye(k)
+    if not np.isfinite(loadings).all():
+        # The criterion cubes the loadings, so non-finite input makes the
+        # inner SVD fail with an error that points at varimax rather than
+        # at the diverged fit that actually produced it.
+        logger.warning(
+            "Varimax: loadings contain non-finite values; skipping rotation."
+        )
+        return loadings.copy(), np.eye(k)
 
     # Start from the identity rotation
     R = np.eye(k)
@@ -181,6 +189,10 @@ class DynamicFactorModel:
         # Factor names in the order varimax actually produced them,
         # matched to anchor loadings rather than assumed positionally.
         self._matched_factor_names: list[str] | None = None
+        # Anchor-loading strength per assigned name, relative to the
+        # factor's average loading.  Below ~1.0 the name is not
+        # evidenced and should not be trusted by downstream code.
+        self._factor_match_quality: dict[str, float] = {}
         self._A: np.ndarray | None = None
         self._Q: np.ndarray | None = None
         self._R: np.ndarray | None = None
@@ -262,6 +274,13 @@ class DynamicFactorModel:
         C = C_init.copy()
 
         prev_ll = -np.inf
+        # Last parameter set known to be finite.  Panels spanning 2020
+        # carry 20-sigma observations in the claims and payrolls series,
+        # which can drive the EM to diverge: the M-step then returns NaN
+        # loadings, and the failure only surfaces later inside varimax's
+        # SVD as "SVD did not converge" — 40 of 710 windows in an extended
+        # walk-forward, every one of them in 2020 or later.
+        last_good = (A.copy(), C.copy(), Q.copy(), R.copy())
         for iteration in range(self.max_iter):
             # Build (potentially augmented) Kalman matrices
             if use_cumulator:
@@ -345,6 +364,18 @@ class DynamicFactorModel:
                         counts[i] += 1
             counts[counts == 0] = 1.0
             R = np.diag(diag_R / counts)
+
+            # Stop on divergence rather than propagating NaN downstream.
+            if not all(np.isfinite(m).all() for m in (A, C, Q, R)):
+                logger.warning(
+                    f"DFM: EM diverged at iteration {iteration} "
+                    f"(non-finite parameters); keeping the last finite "
+                    f"estimate. This usually means extreme outliers in the "
+                    f"panel — check the standardised values around 2020."
+                )
+                A, C, Q, R = (m.copy() for m in last_good)
+                break
+            last_good = (A.copy(), C.copy(), Q.copy(), R.copy())
 
         # --- Store results ---
         self._A = A
@@ -526,11 +557,24 @@ class DynamicFactorModel:
     # Anchor series whose loadings should be *positive* on their factor.
     # For each factor name we list FRED codes that unambiguously move in
     # the "positive" direction of that economic concept.
+    # Anchor sets must be **disjoint**.  PAYEMS was previously an anchor
+    # for both real_activity and labor_market, which makes the assignment
+    # ill-posed: when one factor dominates both names' anchor sets the two
+    # pairings score identically and the tie is broken arbitrarily, so the
+    # label can land on whichever factor the solver happened to pick.
+    # PAYEMS is a labour series, so it belongs to one list only.
+    #
+    # TEDRATE is retained here for pre-2022 samples but is discontinued;
+    # BAMLH0A0HYM2 is the live credit-stress anchor.
     _SIGN_ANCHORS: dict[str, list[str]] = {
-        "real_activity": ["INDPRO", "PAYEMS", "CFNAI", "W875RX1"],
-        "labor_market": ["PAYEMS", "JTSJOL", "CES0500000003"],
+        "real_activity": ["INDPRO", "IPMAN", "TCU", "CFNAI", "CMRMTSPL"],
+        "labor_market": [
+            "PAYEMS", "JTSJOL", "CES0500000003", "TEMPHELPS", "AWHAETP",
+        ],
         "inflation": ["CPIAUCSL", "CPILFESL", "PCEPI", "PCEPILFE", "PPIFIS"],
-        "financial_stress": ["BAA10Y", "TEDRATE", "VIXCLS"],
+        "financial_stress": [
+            "BAA10Y", "BAMLH0A0HYM2", "VIXCLS", "NFCI", "TEDRATE",
+        ],
     }
 
     def _match_factors_to_names(
@@ -588,6 +632,38 @@ class DynamicFactorModel:
             assigned[k] = j
 
         matched_names = [names[j] for j in assigned]
+
+        # Record how well each name is actually evidenced.  The assignment
+        # always produces *some* pairing, so a name can be attached to a
+        # factor its anchors barely load on — and downstream code then
+        # trusts the label.  Observed on the live panel: "labor_market"
+        # was assigned to a factor whose strongest loadings were BAA, AAA
+        # and GS10, i.e. bond yields, and the Markov-switching model was
+        # fitted on it as though it were labour-market data.
+        self._factor_match_quality = {}
+        for k, j in enumerate(assigned):
+            idx = anchor_idx_by_name.get(j, [])
+            if not idx:
+                self._factor_match_quality[names[j]] = float("nan")
+                continue
+            anchor_strength = float(np.mean(np.abs(loadings[idx, k])))
+            typical = float(np.mean(np.abs(loadings[:, k]))) or 1.0
+            ratio = anchor_strength / typical
+            self._factor_match_quality[names[j]] = ratio
+            if ratio < 1.0:
+                strongest = int(np.argmax(np.abs(loadings[:, k])))
+                series = (
+                    self._series_names[strongest]
+                    if self._series_names else f"column {strongest}"
+                )
+                logger.warning(
+                    f"DFM: factor named '{names[j]}' is weakly evidenced — "
+                    f"its anchor series load {ratio:.2f}x the factor's "
+                    f"average, and its strongest loading is on '{series}'. "
+                    f"Treat the name as a label of convenience, and do not "
+                    f"select this factor by name for downstream models."
+                )
+
         signs = _default_sign_convention(loadings)
         for k, j in enumerate(assigned):
             idx = anchor_idx_by_name.get(j, [])
