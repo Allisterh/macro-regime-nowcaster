@@ -61,6 +61,40 @@ def _default_nber_cutoff() -> pd.Timestamp:
     return last_trough + pd.offsets.MonthEnd(0)
 
 
+
+def _latest_published(
+    series: pd.Series, fallback: float = 0.5
+) -> tuple[float, pd.Timestamp | None]:
+    """Most recent genuinely observed value, with the date it refers to.
+
+    The panel edge is ragged *by design*: publication lags mask the last
+    month or two of every series, which is what makes the backtest
+    honest.  Reading ``.iloc[-1]`` there sees NaN and falls back to an
+    uninformative 0.5 even though a perfectly good observation exists one
+    or two months earlier — and 0.5 is indistinguishable from a real
+    reading once it reaches a chart.
+
+    Using the latest *published* value is what a nowcast is: CFNAI for
+    August is not available in August, so you use July's and you say so.
+    This is not the forward-fill the pipeline forbids — that would feed
+    stale values into the model as if they were current observations.
+    Here the value is used once, as a point estimate, and its reference
+    date is returned so callers can report the staleness.
+
+    Returns
+    -------
+    (value, as_of)
+        ``as_of`` is ``None`` when the series is empty or all NaN, in
+        which case *fallback* is returned.
+    """
+    if series is None or len(series) == 0:
+        return fallback, None
+    observed = series.dropna()
+    if observed.empty:
+        return fallback, None
+    return float(observed.iloc[-1]), observed.index[-1]
+
+
 # ---------------------------------------------------------------------------
 # NowcastResult
 # ---------------------------------------------------------------------------
@@ -195,8 +229,12 @@ class Nowcaster:
         # the 1950s where T10Y2Y/BAA10Y would cut the sample at 1982.
         "extra_features": [
             "CFNAI", "T10Y2Y", "BAA10Y", "TERM_SPREAD", "CREDIT_SPREAD",
-            "BAMLH0A0HYM2", "DRTSCILM", "PERMIT",
+            "BAMLH0A0HYM2", "PERMIT",
         ],
+        # DRTSCILM (bank lending standards) is deliberately absent: it is
+        # quarterly, so in this monthly panel it is 67% missing and the
+        # column screen drops it anyway.  Listing it only created the
+        # impression it was contributing.
         "tune_regularization": False,
         "calibrate": False,
     }
@@ -290,6 +328,9 @@ class Nowcaster:
         self._last_factors: pd.DataFrame | None = None
         self._last_panel: pd.DataFrame | None = None
         self._ensemble_recession_ts: pd.Series | None = None
+        # Reference date of each signal's latest published value,
+        # populated by _run_ensemble().
+        self._signal_as_of: dict[str, pd.Timestamp | None] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -662,15 +703,18 @@ class Nowcaster:
         # Align by index only; do NOT forward/back-fill, which would
         # carry stale values into otherwise-missing months at the edge.
         rsm_ts = pd.Series(0.5, index=idx, dtype=float)
+        asof_rsm = asof_probit = asof_cfnai = asof_sahm = None
         try:
             rsm_probs = self._rsm.get_recession_probability()
             if isinstance(rsm_probs, pd.Series):
-                rsm_ts = rsm_probs.reindex(idx).fillna(0.5)
+                rsm_ts = rsm_probs.reindex(idx)
+                p_rsm, asof_rsm = _latest_published(rsm_ts)
+                rsm_ts = rsm_ts.fillna(0.5)
             else:
                 rsm_ts = pd.Series(rsm_probs, index=idx, dtype=float).fillna(0.5)
         except Exception:
             pass
-        p_rsm = float(rsm_ts.iloc[-1])
+        p_rsm, asof_rsm = _latest_published(rsm_ts)
         logger.debug(f"Ensemble RSM: P(recession) = {p_rsm:.3f}")
 
         # --- Signal 2: Probit model (full time series) ---
@@ -728,8 +772,14 @@ class Nowcaster:
                 all_proba = self._probit.predict_proba(probit_features)
                 probit_ts = pd.Series(
                     all_proba, index=probit_features.index, dtype=float,
-                ).reindex(idx).fillna(0.5)
-                p_probit = float(probit_ts.iloc[-1])
+                ).reindex(idx)
+                # predict_proba returns exactly 0.5 for rows it could not
+                # score, so those are treated as unobserved here rather
+                # than as a genuine 50% reading.
+                p_probit, asof_probit = _latest_published(
+                    probit_ts.where(probit_ts != 0.5)
+                )
+                probit_ts = probit_ts.fillna(0.5)
             else:
                 logger.warning("Probit: too few training samples, using 0.5")
         except Exception as exc:
@@ -754,8 +804,10 @@ class Nowcaster:
                 cfnai_ma3 = cfnai_raw.rolling(window=3, min_periods=2).mean()
                 # Logistic: P(rec) = 1 / (1 + exp((MA3 + 0.7) / 0.3))
                 cfnai_ts = 1.0 / (1.0 + np.exp((cfnai_ma3 + 0.7) / 0.3))
+                # Read the point estimate before filling, or the fill value
+                # is all it can ever see.
+                p_cfnai, asof_cfnai = _latest_published(cfnai_ts)
                 cfnai_ts = cfnai_ts.fillna(0.5)
-                p_cfnai = float(cfnai_ts.iloc[-1])
             else:
                 logger.debug("CFNAI raw level unavailable, using 0.5")
         except Exception:
@@ -772,8 +824,9 @@ class Nowcaster:
             # quantity entirely — read the raw level instead.
             unrate_raw = self._raw_level("UNRATE", idx)
             if unrate_raw is not None:
-                sahm_ts = sahm_recession_probability(unrate_raw).fillna(0.5)
-                p_sahm = float(sahm_ts.iloc[-1])
+                sahm_ts = sahm_recession_probability(unrate_raw)
+                p_sahm, asof_sahm = _latest_published(sahm_ts)
+                sahm_ts = sahm_ts.fillna(0.5)
             else:
                 logger.debug("UNRATE raw level unavailable, Sahm using 0.5")
         except Exception:
@@ -789,7 +842,41 @@ class Nowcaster:
         ).clip(0.0, 1.0)
         self._ensemble_recession_ts = ensemble_ts
 
-        p_ensemble = float(ensemble_ts.iloc[-1])
+        # Headline probability from the per-signal point estimates, not
+        # from the last row of the filled time series.  The series carries
+        # 0.5 wherever a signal is unpublished at that month, so reading
+        # its final row blends real readings with fill values — and the
+        # number then disagrees with the breakdown shown beside it.
+        p_ensemble = float(
+            np.clip(
+                sum(
+                    w.get(name, 0.0) * value
+                    for name, value in (
+                        ("rsm", p_rsm), ("probit", p_probit),
+                        ("cfnai", p_cfnai), ("sahm", p_sahm),
+                    )
+                ),
+                0.0,
+                1.0,
+            )
+        )
+        # The ensemble is only as current as its most stale weighted input.
+        weighted_asof = [
+            a for name, a in (
+                ("rsm", asof_rsm), ("probit", asof_probit),
+                ("cfnai", asof_cfnai), ("sahm", asof_sahm),
+            )
+            if a is not None and w.get(name, 0.0) > 0
+        ]
+        asof_ensemble = min(weighted_asof) if weighted_asof else None
+
+        # Staleness of each point estimate, so callers can say how old a
+        # reading is instead of presenting a two-month-old value as current.
+        self._signal_as_of = {
+            "rsm": asof_rsm, "probit": asof_probit,
+            "cfnai": asof_cfnai, "sahm": asof_sahm,
+            "ensemble": asof_ensemble,
+        }
 
         detail = {
             "rsm": p_rsm,
