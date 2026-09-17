@@ -303,6 +303,10 @@ def _run_nowcast(start: str, end: str, n_fac: int):
             "factors": factors,
             "regime_probs": regime_probs,
             "timestamp": timestamp,
+            # Reference date behind each signal. The panel edge is ragged
+            # by design, so a reading is typically one or two months old.
+            "signal_as_of": dict(getattr(nowcaster, "_signal_as_of", {}) or {}),
+            "weights": dict(nowcaster.ensemble_weights),
         }, None
     except Exception as exc:  # noqa: BLE001
         logger.exception("Nowcast run failed")
@@ -383,15 +387,25 @@ else:
         st.subheader("Ensemble Signal Breakdown")
         detail = result.ensemble_detail
         if detail:
+            weights = data.get("weights", {})
+            as_of = data.get("signal_as_of", {})
             signal_names = []
             signal_vals = []
             signal_colors = []
-            for key in ["rsm", "probit", "cfnai"]:
+            # Sahm was missing from this chart entirely even though it is
+            # part of the ensemble; a component with weight 0 still belongs
+            # here, labelled, rather than silently absent.
+            labels = {
+                "rsm": "RSM (Markov)", "probit": "Probit",
+                "cfnai": "CFNAI", "sahm": "Sahm",
+            }
+            for key in ["rsm", "probit", "cfnai", "sahm"]:
                 if key in detail:
-                    label = {"rsm": "RSM (Markov)", "probit": "Probit", "cfnai": "CFNAI"}[key]
-                    signal_names.append(label)
+                    weight = weights.get(key)
+                    suffix = f"  (w={weight:.2f})" if weight is not None else ""
+                    signal_names.append(labels[key] + suffix)
                     signal_vals.append(detail[key])
-                    signal_colors.append(SIGNAL_COLORS[key])
+                    signal_colors.append(SIGNAL_COLORS.get(key, "#95a5a6"))
 
             # Add ensemble bar
             if "ensemble" in detail:
@@ -417,6 +431,24 @@ else:
                 margin=dict(l=10, r=10, t=10, b=30),
             )
             st.plotly_chart(fig_ens, use_container_width=True)
+
+            # Say how old each reading is. Publication lags mask the last
+            # month or two of every series, so a signal is normally one or
+            # two months stale — and a bar labelled 50.0% is usually a
+            # signal that could not be computed, not a genuine coin flip.
+            stamps = [
+                f"{labels[k]} {as_of[k]:%b %Y}"
+                for k in ["rsm", "probit", "cfnai", "sahm"]
+                if as_of.get(k) is not None
+            ]
+            if stamps:
+                st.caption(
+                    "Latest published reading behind each signal — the panel "
+                    "edge is ragged by design, so these lag the current "
+                    "month: " + " · ".join(stamps) + ". "
+                    "Signals weighted 0.00 are computed and shown but do not "
+                    "enter the ensemble; see the Architecture panel for why."
+                )
         else:
             st.info("Ensemble detail not available")
 

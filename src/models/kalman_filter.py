@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from loguru import logger
 
 # ---------------------------------------------------------------------------
 # Result containers
@@ -45,6 +46,40 @@ class SmootherResult:
 # ---------------------------------------------------------------------------
 # Kalman filter
 # ---------------------------------------------------------------------------
+
+
+def _robust_inverse(S: np.ndarray, jitter: float = 1e-8) -> np.ndarray:
+    """Pseudo-inverse that tolerates a badly conditioned innovation covariance.
+
+    ``np.linalg.pinv`` runs an SVD internally, and LAPACK's divide-and-
+    conquer driver can fail outright with "SVD did not converge" on a
+    near-singular matrix.  That is not hypothetical here: panels covering
+    2020 carry 20-sigma observations in the claims and payrolls series,
+    which drives the innovation covariance to the edge of singularity and
+    took down 40 of 710 windows in an extended walk-forward — all of them
+    in 2020 or later, so the failures cluster on exactly the dates a live
+    dashboard would be asking about.
+
+    Retry with increasing ridge regularisation, which restores
+    conditioning without meaningfully changing the inverse, and fall back
+    to a diagonal approximation if even that fails.  A slightly damped
+    Kalman gain is much better than losing the observation entirely.
+    """
+    eye = np.eye(S.shape[0])
+    for scale in (0.0, jitter, jitter * 1e2, jitter * 1e4, jitter * 1e6):
+        try:
+            return np.linalg.pinv(S + scale * eye)
+        except np.linalg.LinAlgError:
+            continue
+    # Last resort: treat the observations as independent.  Crude, but it
+    # keeps the filter running rather than discarding the whole window.
+    diag = np.clip(np.diag(S), jitter, None)
+    logger.warning(
+        "Kalman: innovation covariance could not be inverted even with "
+        "ridge regularisation; falling back to a diagonal approximation."
+    )
+    return np.diag(1.0 / diag)
+
 
 class KalmanFilter:
     """Standard linear-Gaussian Kalman filter with NaN support.
@@ -153,7 +188,7 @@ class KalmanFilter:
                         n_o * np.log(2 * np.pi) + logdet + innov @ S_inv @ innov
                     )
                 else:
-                    S_inv = np.linalg.pinv(S)
+                    S_inv = _robust_inverse(S)
 
                 # Kalman gain
                 K = P_pred @ C_obs.T @ S_inv

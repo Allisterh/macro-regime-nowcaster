@@ -61,6 +61,40 @@ def _default_nber_cutoff() -> pd.Timestamp:
     return last_trough + pd.offsets.MonthEnd(0)
 
 
+
+def _latest_published(
+    series: pd.Series, fallback: float = 0.5
+) -> tuple[float, pd.Timestamp | None]:
+    """Most recent genuinely observed value, with the date it refers to.
+
+    The panel edge is ragged *by design*: publication lags mask the last
+    month or two of every series, which is what makes the backtest
+    honest.  Reading ``.iloc[-1]`` there sees NaN and falls back to an
+    uninformative 0.5 even though a perfectly good observation exists one
+    or two months earlier — and 0.5 is indistinguishable from a real
+    reading once it reaches a chart.
+
+    Using the latest *published* value is what a nowcast is: CFNAI for
+    August is not available in August, so you use July's and you say so.
+    This is not the forward-fill the pipeline forbids — that would feed
+    stale values into the model as if they were current observations.
+    Here the value is used once, as a point estimate, and its reference
+    date is returned so callers can report the staleness.
+
+    Returns
+    -------
+    (value, as_of)
+        ``as_of`` is ``None`` when the series is empty or all NaN, in
+        which case *fallback* is returned.
+    """
+    if series is None or len(series) == 0:
+        return fallback, None
+    observed = series.dropna()
+    if observed.empty:
+        return fallback, None
+    return float(observed.iloc[-1]), observed.index[-1]
+
+
 # ---------------------------------------------------------------------------
 # NowcastResult
 # ---------------------------------------------------------------------------
@@ -195,8 +229,12 @@ class Nowcaster:
         # the 1950s where T10Y2Y/BAA10Y would cut the sample at 1982.
         "extra_features": [
             "CFNAI", "T10Y2Y", "BAA10Y", "TERM_SPREAD", "CREDIT_SPREAD",
-            "BAMLH0A0HYM2", "DRTSCILM", "PERMIT",
+            "BAMLH0A0HYM2", "PERMIT",
         ],
+        # DRTSCILM (bank lending standards) is deliberately absent: it is
+        # quarterly, so in this monthly panel it is 67% missing and the
+        # column screen drops it anyway.  Listing it only created the
+        # impression it was contributing.
         "tune_regularization": False,
         "calibrate": False,
     }
@@ -210,6 +248,12 @@ class Nowcaster:
     # the cyclical factors gives AUC 0.820 at 33%.  Set to None to use
     # every factor.
     DEFAULT_RSM_FACTORS = ["real_activity", "labor_market"]
+
+    # Minimum anchor-loading strength (relative to a factor's average
+    # loading) for its *name* to be trusted when selecting factors for
+    # the regime model.  1.0 means the anchors must load at least as
+    # strongly as a typical series on that factor.
+    MIN_FACTOR_MATCH_QUALITY = 1.0
 
     def __init__(
         self,
@@ -290,6 +334,9 @@ class Nowcaster:
         self._last_factors: pd.DataFrame | None = None
         self._last_panel: pd.DataFrame | None = None
         self._ensemble_recession_ts: pd.Series | None = None
+        # Reference date of each signal's latest published value,
+        # populated by _run_ensemble().
+        self._signal_as_of: dict[str, pd.Timestamp | None] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -517,6 +564,16 @@ class Nowcaster:
             # Convert monthly factors → quarterly averages
             factors_q = factors.resample("QE").mean().dropna()
 
+            # FRED stamps GDPC1 at the *start* of its quarter (2002-01-01)
+            # while resampling the monthly factors gives quarter *ends*
+            # (2002-03-31), so the two indexes never intersect and this
+            # calibration silently fell through to the hard-coded trend on
+            # every run.  Roll GDP onto quarter-ends before aligning.
+            gdpc1_growth = gdpc1_growth.copy()
+            gdpc1_growth.index = (
+                gdpc1_growth.index + pd.offsets.QuarterEnd(0)
+            )
+
             # Align on common quarter-end dates
             common = gdpc1_growth.index.intersection(factors_q.index)
             if len(common) < 20:
@@ -598,7 +655,41 @@ class Nowcaster:
         """
         if not self.rsm_factors:
             return factors
+
+        # Select on evidence, not on the label.  Factor names come from an
+        # assignment that always produces *some* pairing, so a name can sit
+        # on a factor its anchor series barely load on.  On the live panel
+        # "labor_market" was assigned to a factor whose strongest loadings
+        # were BAA, AAA and GS10 — bond yields — and fitting the regime
+        # model on it made the recession probability track the level of
+        # interest rates.  That is what produced a 99.9% reading while
+        # every other signal was calm.
+        quality = getattr(self._dfm, "_factor_match_quality", {}) or {}
         available = [c for c in self.rsm_factors if c in factors.columns]
+        if quality:
+            evidenced = [
+                c for c in available
+                if not np.isfinite(quality.get(c, np.nan))
+                or quality.get(c, 0.0) >= self.MIN_FACTOR_MATCH_QUALITY
+            ]
+            dropped = [c for c in available if c not in evidenced]
+            if dropped and evidenced:
+                logger.warning(
+                    f"RSM: excluding {dropped} — the name is not evidenced "
+                    f"by the loadings "
+                    f"({ {c: round(quality[c], 2) for c in dropped} }), so "
+                    f"fitting the regime model on it would track whatever "
+                    f"that factor actually measures."
+                )
+                available = evidenced
+            elif dropped:
+                logger.warning(
+                    f"RSM: none of {available} are well evidenced "
+                    f"({ {c: round(quality.get(c, float('nan')), 2) for c in available} }); "
+                    f"fitting on them anyway, and the regime labels should "
+                    f"not be read literally."
+                )
+
         if not available:
             logger.warning(
                 f"None of rsm_factors={self.rsm_factors} are present in "
@@ -662,15 +753,18 @@ class Nowcaster:
         # Align by index only; do NOT forward/back-fill, which would
         # carry stale values into otherwise-missing months at the edge.
         rsm_ts = pd.Series(0.5, index=idx, dtype=float)
+        asof_rsm = asof_probit = asof_cfnai = asof_sahm = None
         try:
             rsm_probs = self._rsm.get_recession_probability()
             if isinstance(rsm_probs, pd.Series):
-                rsm_ts = rsm_probs.reindex(idx).fillna(0.5)
+                rsm_ts = rsm_probs.reindex(idx)
+                p_rsm, asof_rsm = _latest_published(rsm_ts)
+                rsm_ts = rsm_ts.fillna(0.5)
             else:
                 rsm_ts = pd.Series(rsm_probs, index=idx, dtype=float).fillna(0.5)
         except Exception:
             pass
-        p_rsm = float(rsm_ts.iloc[-1])
+        p_rsm, asof_rsm = _latest_published(rsm_ts)
         logger.debug(f"Ensemble RSM: P(recession) = {p_rsm:.3f}")
 
         # --- Signal 2: Probit model (full time series) ---
@@ -728,8 +822,14 @@ class Nowcaster:
                 all_proba = self._probit.predict_proba(probit_features)
                 probit_ts = pd.Series(
                     all_proba, index=probit_features.index, dtype=float,
-                ).reindex(idx).fillna(0.5)
-                p_probit = float(probit_ts.iloc[-1])
+                ).reindex(idx)
+                # predict_proba returns exactly 0.5 for rows it could not
+                # score, so those are treated as unobserved here rather
+                # than as a genuine 50% reading.
+                p_probit, asof_probit = _latest_published(
+                    probit_ts.where(probit_ts != 0.5)
+                )
+                probit_ts = probit_ts.fillna(0.5)
             else:
                 logger.warning("Probit: too few training samples, using 0.5")
         except Exception as exc:
@@ -754,8 +854,10 @@ class Nowcaster:
                 cfnai_ma3 = cfnai_raw.rolling(window=3, min_periods=2).mean()
                 # Logistic: P(rec) = 1 / (1 + exp((MA3 + 0.7) / 0.3))
                 cfnai_ts = 1.0 / (1.0 + np.exp((cfnai_ma3 + 0.7) / 0.3))
+                # Read the point estimate before filling, or the fill value
+                # is all it can ever see.
+                p_cfnai, asof_cfnai = _latest_published(cfnai_ts)
                 cfnai_ts = cfnai_ts.fillna(0.5)
-                p_cfnai = float(cfnai_ts.iloc[-1])
             else:
                 logger.debug("CFNAI raw level unavailable, using 0.5")
         except Exception:
@@ -772,8 +874,9 @@ class Nowcaster:
             # quantity entirely — read the raw level instead.
             unrate_raw = self._raw_level("UNRATE", idx)
             if unrate_raw is not None:
-                sahm_ts = sahm_recession_probability(unrate_raw).fillna(0.5)
-                p_sahm = float(sahm_ts.iloc[-1])
+                sahm_ts = sahm_recession_probability(unrate_raw)
+                p_sahm, asof_sahm = _latest_published(sahm_ts)
+                sahm_ts = sahm_ts.fillna(0.5)
             else:
                 logger.debug("UNRATE raw level unavailable, Sahm using 0.5")
         except Exception:
@@ -789,7 +892,41 @@ class Nowcaster:
         ).clip(0.0, 1.0)
         self._ensemble_recession_ts = ensemble_ts
 
-        p_ensemble = float(ensemble_ts.iloc[-1])
+        # Headline probability from the per-signal point estimates, not
+        # from the last row of the filled time series.  The series carries
+        # 0.5 wherever a signal is unpublished at that month, so reading
+        # its final row blends real readings with fill values — and the
+        # number then disagrees with the breakdown shown beside it.
+        p_ensemble = float(
+            np.clip(
+                sum(
+                    w.get(name, 0.0) * value
+                    for name, value in (
+                        ("rsm", p_rsm), ("probit", p_probit),
+                        ("cfnai", p_cfnai), ("sahm", p_sahm),
+                    )
+                ),
+                0.0,
+                1.0,
+            )
+        )
+        # The ensemble is only as current as its most stale weighted input.
+        weighted_asof = [
+            a for name, a in (
+                ("rsm", asof_rsm), ("probit", asof_probit),
+                ("cfnai", asof_cfnai), ("sahm", asof_sahm),
+            )
+            if a is not None and w.get(name, 0.0) > 0
+        ]
+        asof_ensemble = min(weighted_asof) if weighted_asof else None
+
+        # Staleness of each point estimate, so callers can say how old a
+        # reading is instead of presenting a two-month-old value as current.
+        self._signal_as_of = {
+            "rsm": asof_rsm, "probit": asof_probit,
+            "cfnai": asof_cfnai, "sahm": asof_sahm,
+            "ensemble": asof_ensemble,
+        }
 
         detail = {
             "rsm": p_rsm,

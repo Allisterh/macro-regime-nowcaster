@@ -62,7 +62,7 @@ class RecessionProbit:
         regularization: float = 0.01,
         class_balanced: bool = False,
         max_missing_fraction: float = 0.5,
-        max_column_missing: float = 0.9,
+        max_column_missing: float = 0.5,
     ) -> None:
         """
         Parameters
@@ -83,6 +83,9 @@ class RecessionProbit:
         self.max_missing_fraction = max_missing_fraction
         # Feature columns missing more than this share of the training
         # window are excluded from the fit rather than emptying it.
+        # 0.5 rather than something laxer because rows are then dropped
+        # on any remaining NaN: a quarterly series in a monthly panel is
+        # 67% missing, and keeping it would discard two rows in three.
         self.max_column_missing = max_column_missing
 
         # Fitted attributes

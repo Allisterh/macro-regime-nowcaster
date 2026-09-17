@@ -249,3 +249,69 @@ def test_factor_names_follow_loadings_not_position():
     assert act_col.idxmax() == "real_activity", (
         f"The 'real_activity' label landed on the wrong factor:\n{act_col}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Factor names must be evidenced, not merely assigned
+# ---------------------------------------------------------------------------
+
+
+def test_weakly_evidenced_factor_names_are_flagged():
+    """Assignment always pairs every name; quality says whether to trust it.
+
+    Matching names to factors by loading evidence still produces *some*
+    pairing for every name, so a label can land on a factor its anchor
+    series barely load on — and downstream code then trusts the label. On
+    the live panel "labor_market" was assigned to a factor whose strongest
+    loadings were BAA, AAA and GS10 (bond yields), and the regime model
+    was fitted on it as though it were labour data, which made the
+    recession probability track the level of interest rates.
+
+    Here only an activity factor exists; the labour anchors have nothing
+    to attach to, and that must be visible in the quality scores.
+    """
+    rng = np.random.default_rng(9)
+    T = 200
+    idx = pd.date_range("2000-01-31", periods=T, freq="ME")
+
+    activity = ["INDPRO", "PAYEMS", "CFNAI", "W875RX1"]
+    rates = ["BAA", "AAA", "GS10", "TB3MS"]
+    cols = activity + rates
+
+    f = np.zeros((T, 2))
+    for t in range(1, T):
+        f[t] = 0.85 * f[t - 1] + rng.standard_normal(2) * 0.35
+
+    loadings = rng.standard_normal((len(cols), 2)) * 0.10
+    loadings[:4, 0] += 1.4          # activity block
+    loadings[4:, 1] += 1.4          # rates block — no labour factor exists
+
+    panel = pd.DataFrame(
+        f @ loadings.T + rng.standard_normal((T, len(cols))) * 0.35,
+        index=idx, columns=cols,
+    )
+
+    dfm = DynamicFactorModel(
+        n_factors=2,
+        factor_names=["real_activity", "labor_market"],
+        max_iter=40,
+    ).fit(panel)
+
+    quality = dfm._factor_match_quality
+    assert quality, "no match-quality scores were recorded"
+    assert set(quality) == {"real_activity", "labor_market"}
+
+    # The panel has one meaningful block and one rates block, so exactly
+    # one of the two names can be genuinely evidenced. Which one wins is
+    # not the point and is not asserted: with both names' anchors loading
+    # on the same factor, either assignment is defensible. What must hold
+    # is that the *other* one is flagged rather than silently trusted.
+    scores = sorted(quality.values())
+    assert scores[0] < 1.0, (
+        f"no name was flagged as weakly evidenced even though only one "
+        f"meaningful factor exists: {quality}"
+    )
+    assert scores[-1] > 1.0, (
+        f"the name matching the real factor block should be well "
+        f"evidenced: {quality}"
+    )

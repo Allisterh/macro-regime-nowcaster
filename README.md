@@ -636,18 +636,29 @@ ones it produces now.
 | Three FRED ids did not exist: the Empire State and Philadelphia Fed codes had their `DI`/`DF` infixes **transposed**, and the gold series was delisted | `DataPipeline` warns and continues on a failed fetch, so the survey block was silently absent from the panel | Corrected; `tests/test_series_config.py` validates every id (opt-in live check) |
 | `.gitignore` contained bare `data/` and `models/` | These match a directory of that name at **any depth**, so `src/data/` and `src/models/` — the DFM, Kalman filter, regime model, probit, nowcaster and backtester — were never under version control | Anchored to `/data/` and `/models/` |
 | Allocation backtest charged no transaction costs | Turnover was computed and reported but never deducted, flattering a strategy that rotates most of the book at a regime switch | `Backtester(transaction_cost_bps=10.0)`, charged on the L1 weight change |
+| **The GDP nowcast was never calibrated.** FRED stamps `GDPC1` at the *start* of its quarter while resampling the monthly factors gives quarter *ends*, so the two indexes never intersected | `_calibrate_gdp` raised "Only 0 common quarters", the exception was caught, and every nowcast used a hard-coded 2.5% trend with a fabricated band — while the README advertised an OLS-calibrated figure | GDP is rolled onto quarter-ends before aligning. The fitted interval is much wider than the fabricated one, which is the honest width |
+| **The EM diverged on panels spanning 2020**, producing NaN loadings; the failure surfaced only later inside varimax's SVD as "SVD did not converge" | 40 of 710 walk-forward windows died, every one in 2020 or later — so the failures clustered on exactly the dates a live dashboard asks about | The EM stops on non-finite parameters and keeps the last finite estimate; varimax refuses non-finite input; the Kalman filter's `pinv` retries with ridge regularisation |
+| **A factor's *name* was trusted where the loadings did not support it.** `labor_market` was assigned to a factor whose strongest loadings were BAA, AAA and GS10 — bond yields — and the regime model was fitted on it by name. Anchor sets also overlapped (`PAYEMS` served two names), making the assignment ill-posed and the tie-break arbitrary | The recession probability tracked the level of interest rates: the RSM read 99.9% while every other signal was calm | Anchor sets are disjoint; the DFM reports a match-quality score per name and warns when one is not evidenced; the RSM selects factors by that score rather than by label. RSM went 0.999 → 0.003 and saturation 90% → 2% |
+| **Three of four signals reported the 0.5 fallback as if it were a reading.** Publication lags mask the last month or two of every series — by design — but the ensemble read `.iloc[-1]`, saw NaN and fell back to 0.5. Separately, `max_column_missing` of 0.9 kept the *quarterly* `DRTSCILM` in a monthly panel, where it is 67% missing, and requiring it non-NaN then dropped two rows in three and emptied the probit's training set | The dashboard showed "Probit 50.0%", indistinguishable from a genuine coin-flip reading, and the headline probability averaged fill values with real ones | Signals use the latest *published* observation and report its date; the headline is computed from those point estimates so it cannot disagree with the breakdown beside it; the column threshold is 0.5 and the quarterly feature is gone |
 | **The probit never trained in 64% of months.** `fit()` dropped every row containing a NaN, so one feature with no data in the training window emptied the whole training set; the exception was caught and the signal left at its 0.5 default | Measured as AUC 0.718 and "below chance beyond nine months", prompting a confident structural story about 1970s oil shocks. It was not underperforming — it was not running. Alive, it scores **0.901** | Columns are screened before rows: a feature absent from the window is excluded from the fit and from prediction. Partial missingness is imputed with training-fold means |
 | **An extended walk-forward silently lost six of ten recessions.** `_quarterly_to_monthly` called `.index.min()` on an empty series, giving `NaT`; series starting after the as-of date correctly return nothing and took down the entire window | A run launched to cover 1967-2025 produced only 1996-2025, and reported "DONE" with a row count that looked plausible | Empty input is treated as the normal condition it is. The runner keeps WARNING-level logging so failed windows are visible |
 | `ragged_edge_mask` did ~38k scalar `.loc` writes per call | Dominated pipeline time in expanding backtests | Vectorised: **37× faster**, bit-identical output |
 
 
-**A note on how these were found.** Both of the failures above were silent: an
+**A note on how these were found.** All of the failures above were silent: an
 exception swallowed by a `try/except`, a fallback of 0.5 that looks like a
-legitimate probability, and a "DONE" line with a plausible row count. Each one
-produced *numbers*, and those numbers supported confident, wrong conclusions
-until something was reconciled against a count that did not match. The tests
-added alongside each fix assert the behaviour rather than the absence of an
-exception, because an exception was never raised.
+legitimate probability, a "DONE" line with a plausible row count, and a NaN
+comparing false against a threshold. Each produced *numbers*, and those numbers
+supported confident, wrong conclusions until something was reconciled against a
+count that did not match. The tests added alongside each fix assert the
+behaviour rather than the absence of an exception, because an exception was
+never raised.
+
+The 0.5 fallback is the worst offender, and it is worth stating as a design
+rule: **a sentinel that is indistinguishable from a legitimate output will be
+mistaken for one.** Every signal now carries the reference date of the
+observation behind it, so a stale or unavailable reading is visible rather than
+inferred.
 
 The one change here that is a **modelling opinion rather than a bug fix** is the
 RSM factor restriction described under [Hamilton (1989) Markov-Switching
