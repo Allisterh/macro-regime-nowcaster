@@ -85,3 +85,74 @@ def test_rsm_is_not_silently_reweighted(config_weights):
         "calibration. Re-run scripts/build_features.py and confirm the "
         "Brier score before restoring it."
     )
+
+
+# ---------------------------------------------------------------------------
+# Factor configuration
+# ---------------------------------------------------------------------------
+
+
+def test_factor_names_agree_between_config_and_code(config_weights):  # noqa: ARG001
+    """settings.yaml and Nowcaster.DEFAULT_FACTOR_NAMES must not drift."""
+    with CONFIG_PATH.open(encoding="utf-8") as fh:
+        model_cfg = yaml.safe_load(fh)["model"]
+
+    assert model_cfg["factor_names"] == Nowcaster.DEFAULT_FACTOR_NAMES
+    assert model_cfg["n_factors"] == len(Nowcaster.DEFAULT_FACTOR_NAMES)
+
+
+def test_no_labour_factor_is_claimed_by_default():
+    """The default names must not include one the panel cannot support.
+
+    There is no distinct labour factor at any K from 3 to 6 — it scores
+    0.19-0.27 against the 90th-percentile loading, because the labour
+    series load on real activity. Listing it anyway meant the label was
+    assigned regardless and landed on a yield-curve factor, and the
+    regime model then tracked interest rates while calling them labour.
+    """
+    assert "labor_market" not in Nowcaster.DEFAULT_FACTOR_NAMES, (
+        "labor_market is back in the default factor names; re-check the "
+        "match-quality scores before restoring it"
+    )
+
+
+def test_every_default_factor_name_has_anchors():
+    """A name with no anchors cannot be validated, so it must not be a default.
+
+    Unanchored names score NaN and bypass the evidence check entirely —
+    which is how the yield-curve and long-rates factors went unnamed and
+    were absorbed by whatever label was left over.
+    """
+    from src.models.dynamic_factor_model import DynamicFactorModel
+
+    anchors = DynamicFactorModel._SIGN_ANCHORS
+    missing = [n for n in Nowcaster.DEFAULT_FACTOR_NAMES if not anchors.get(n)]
+    assert not missing, f"default factor names without anchor series: {missing}"
+
+
+def test_anchor_sets_are_disjoint():
+    """Overlapping anchors make the name assignment ill-posed.
+
+    PAYEMS once anchored both real_activity and labor_market. When one
+    factor dominates both names' anchors the two pairings score
+    identically and the tie is broken arbitrarily, so the label lands on
+    whichever factor the solver happened to pick.
+    """
+    from itertools import combinations
+
+    from src.models.dynamic_factor_model import DynamicFactorModel
+
+    anchors = DynamicFactorModel._SIGN_ANCHORS
+    for a, b in combinations(anchors, 2):
+        shared = set(anchors[a]) & set(anchors[b])
+        assert not shared, f"{a} and {b} share anchor series {shared}"
+
+
+def test_rsm_fits_on_the_cyclical_block_only():
+    """The regime variable is the business cycle, not rates or prices."""
+    for name in Nowcaster.DEFAULT_RSM_FACTORS:
+        assert name in Nowcaster.DEFAULT_FACTOR_NAMES, (
+            f"RSM is configured to use '{name}', which is not a default factor"
+        )
+    assert "yield_curve" not in Nowcaster.DEFAULT_RSM_FACTORS
+    assert "inflation" not in Nowcaster.DEFAULT_RSM_FACTORS

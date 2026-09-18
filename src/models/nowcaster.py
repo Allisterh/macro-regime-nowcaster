@@ -247,7 +247,30 @@ class Nowcaster:
     # recession occupancy (it fires half the time), while restricting to
     # the cyclical factors gives AUC 0.820 at 33%.  Set to None to use
     # every factor.
-    DEFAULT_RSM_FACTORS = ["real_activity", "labor_market"]
+    # Factor names, in the order the panel actually supports them.
+    # Measured anchor-loading quality (anchors vs the factor's
+    # 90th-percentile loading) on the live panel at K=5:
+    #
+    #   financial_stress 2.19   yield_curve 1.90   long_rates 1.51
+    #   real_activity    1.36   inflation   0.80
+    #
+    # There is no distinct *labour* factor at any K from 3 to 6 — it
+    # scores 0.19-0.27 throughout, because the labour series load on real
+    # activity, which is economically sensible. It was previously in this
+    # list, so the label was assigned anyway and landed on a yield-curve
+    # factor; the regime model then tracked interest rates while calling
+    # them labour. Naming the two rates factors explicitly is what stops
+    # a leftover label absorbing them.
+    DEFAULT_FACTOR_NAMES = [
+        "real_activity", "inflation", "financial_stress",
+        "yield_curve", "long_rates",
+    ]
+
+    # Fitted on the cyclical block only. Hamilton's regime variable is the
+    # business-cycle state; the rates and inflation factors are not that,
+    # and fitting on them is what produced a recession probability that
+    # tracked the level of interest rates.
+    DEFAULT_RSM_FACTORS = ["real_activity"]
 
     # Minimum anchor-loading strength (relative to a factor's average
     # loading) for its *name* to be trusted when selecting factors for
@@ -258,7 +281,7 @@ class Nowcaster:
     def __init__(
         self,
         pipeline: object,
-        n_factors: int = 4,
+        n_factors: int = 5,
         n_regimes: int = 2,
         regime_labels: list[str] | None = None,
         factor_names: list[str] | None = None,
@@ -303,9 +326,7 @@ class Nowcaster:
             ]
         else:
             self.regime_labels = [f"regime_{i}" for i in range(n_regimes)]
-        self.factor_names = factor_names or [
-            "real_activity", "labor_market", "inflation", "financial_stress"
-        ][:n_factors]
+        self.factor_names = factor_names or self.DEFAULT_FACTOR_NAMES[:n_factors]
         self.use_ensemble = use_ensemble
         # Months ahead the ensemble is asked to forecast.  0 reproduces the
         # original coincident nowcast.

@@ -38,24 +38,25 @@ and [Is It Useful Downstream?](#is-it-useful-downstream)
 
 | | |
 |---|---|
-| Recession detection, real-time | AUC **0.917**, Brier **0.0837** |
-| …against CFNAI alone | AUC 0.861, Brier 0.1039 |
-| Calibration vs CFNAI | **19% better, P = 0.98** (CI excludes zero) |
-| Discrimination vs CFNAI | +0.057 AUC — inside the noise band |
-| Forecasting 12 months out | AUC 0.611 — modest |
+| Recession detection, real-time | AUC **0.950**, Brier **0.0699** |
+| …against CFNAI alone | AUC 0.863, Brier 0.1017 |
+| Discrimination vs CFNAI | **+0.087 AUC, P = 0.99** (CI excludes zero) |
+| Calibration vs CFNAI | **31% better, P = 0.98** (CI excludes zero) |
+| Forecasting 12 months out | AUC 0.672 — modest, but ahead of CFNAI's 0.631 |
 | Predicting forward equity returns | **no skill** (negative R² everywhere) |
 | Predicting forward vol / drawdown | **no skill either** on the full sample — an earlier positive result did not survive extending it |
 | COVID, in real time | **missed** — two months is below the data's resolution |
 
-**Read this before building on it.** The ensemble produces a
-*better-calibrated* probability than CFNAI — significantly so — while its
-ability to *rank* periods is statistically indistinguishable from it. It is a
-coincident detector, not a forecaster: at twelve months it is barely better than
-a coin flip, and it missed COVID entirely. Its defensible value is a calibrated
-probability, an interpretable decomposition of 75 series, and a point-in-time
-feature generator tested not to leak. The evaluation harness that establishes
-all of this is part of the repository, and reproducing any number is one
-command.
+**Read this before building on it.** The ensemble beats CFNAI on both
+discrimination and calibration, with both confidence intervals excluding zero.
+But it is a coincident detector, not a forecaster: at twelve months it is
+modest, and it missed COVID entirely — correctly, since a two-month
+policy-induced stop is not a business-cycle turning point. And it showed **no
+usable skill on equity targets** under purged cross-validation. Its defensible
+value is a well-calibrated recession probability, an interpretable decomposition
+of 75 series into factors that are *checked* to mean what they are named, and a
+point-in-time feature generator tested not to leak. The harness that establishes
+all of this is in the repository, and reproducing any number is one command.
 
 ---
 
@@ -80,7 +81,7 @@ Four independent recession signals are combined with calibrated weights:
 
 ### Latent Factor Dynamics
 
-Four interpretable factors extracted via PCA + EM + varimax rotation. Names are assigned by *loading evidence* rather than column position — varimax does not preserve ordering — and signs are fixed by a loading-sum convention so the factor orientation is reproducible across runs:
+Five interpretable factors extracted via PCA + EM + varimax rotation. Names are assigned by *loading evidence* rather than column position — varimax does not preserve ordering — and signs are fixed by a loading-sum convention so the factor orientation is reproducible across runs:
 
 ![Latent Factors](docs/images/latent_factors.png)
 
@@ -476,23 +477,24 @@ actually went wrong at some point:
 
 ## Measured Real-Time Performance
 
-Every figure below comes from a **walk-forward**: 670 monthly refits from 1967
-to 2025, each fitted only on data available at that date and contributing only
+Every figure below comes from a **walk-forward**: 690 monthly refits from 1967
+to 2026, each fitted only on data available at that date and contributing only
 its own final row. No number here is in-sample.
 
 The sample covers **eight** recessions — 1969-70, 1973-75, 1980, 1981-82,
-1990-91, 2001, 2007-09 and 2020 — and 85 recession months out of 670. Reaching
+1990-91, 2001, 2007-09 and 2020 — and 85 recession months out of 690. Reaching
 back past 1980 is what the reconstructed `TERM_SPREAD` and `CREDIT_SPREAD`
 series are for: FRED's ready-made `T10Y3M` and `BAA10Y` start only in 1982 and
 1986, which would cap the evidence at four recessions.
 
 | Signal | AUC | Brier |
 |--------|-----|-------|
-| **Ensemble** | **0.917** | **0.0837** |
-| Probit | 0.901 | 0.0879 |
-| CFNAI signal alone | 0.861 | 0.1039 |
-| Sahm rule | 0.781 | 0.1790 |
-| *Constant forecast at the 12.7% base rate* | 0.500 | 0.1108 |
+| **Ensemble** | **0.950** | **0.0699** |
+| Probit | 0.933 | 0.0771 |
+| CFNAI signal alone | 0.863 | 0.1017 |
+| Sahm rule | 0.782 | 0.1777 |
+| Markov-switching (RSM) | 0.543 | 0.5317 |
+| *Constant forecast at the 12.3% base rate* | 0.500 | 0.1118 |
 
 ### Does it beat CFNAI?
 
@@ -502,48 +504,46 @@ episodes, with weights fixed in advance:
 
 | Metric | Ensemble − CFNAI | 95% CI | Verdict |
 |--------|------------------|--------|---------|
-| AUC | +0.057 | [−0.011, +0.178] | indistinguishable |
-| **Brier** | **−0.0202** | **[−0.0512, −0.0004]** | **ensemble wins (P = 0.98)** |
+| **AUC** | **+0.087** | **[+0.010, +0.221]** | **ensemble wins (P = 0.99)** |
+| **Brier** | **−0.0318** | **[−0.0800, −0.0014]** | **ensemble wins (P = 0.98)** |
 
-**On calibration, yes — significantly.** The interval excludes zero, and the
-ensemble's Brier is 19% better than CFNAI's. On *discrimination* the two remain
-statistically indistinguishable, though the ensemble leads at every horizon out
-to nine months.
+**Yes, on both, and both intervals exclude zero.** It discriminates better *and*
+is better calibrated — a 31% improvement in Brier score over the published index.
 
-That split matters more than it might look. Ranking periods correctly and
-producing a number whose 0.30 means 30% are different properties, and the second
-is the one that counts when the output is consumed as a feature by something
-downstream. A well-calibrated probability is the defensible product here.
+This is a change from an earlier configuration, where the AUC edge was inside
+the noise band and only the calibration advantage held. The difference is not a
+new model: it is the factor-naming fix described below. The regime model had
+been fitted on a factor labelled `labor_market` that was in fact a yield-curve
+factor, so part of the ensemble was tracking interest rates.
 
-### Discrimination decays with horizon
+It also leads at **every** horizon:
 
-| Horizon | Ensemble | CFNAI | Probit | Sahm |
-|---------|----------|-------|--------|------|
-| 0m | **0.917** | 0.861 | 0.901 | 0.781 |
-| 3m | **0.843** | 0.802 | 0.824 | 0.700 |
-| 6m | **0.758** | 0.728 | 0.738 | 0.661 |
-| 9m | **0.676** | 0.660 | 0.642 | 0.641 |
-| 12m | 0.611 | **0.630** | 0.558 | 0.619 |
-| 18m | 0.539 | **0.586** | 0.487 | 0.555 |
+| Horizon | Ensemble | CFNAI | Probit |
+|---------|----------|-------|--------|
+| 0m | **0.950** | 0.863 | 0.933 |
+| 3m | **0.889** | 0.805 | 0.854 |
+| 6m | **0.811** | 0.730 | 0.760 |
+| 9m | **0.734** | 0.661 | 0.670 |
+| 12m | **0.672** | 0.631 | 0.594 |
+| 18m | **0.596** | 0.590 | 0.540 |
 
-The ensemble leads to nine months; CFNAI takes over beyond that. None of these
-gaps is individually significant — the dashboard plots them with block-bootstrap
-bands, which overlap heavily, and that is the honest way to read the table.
+The dashboard plots these with block-bootstrap bands. The per-horizon gaps
+beyond 0m are not individually significant, and the bands overlap.
 
 ### Caveats that bound every number above
 
-**Eight episodes is still a small sample.** Doubling it from four (1990-2026) to
-eight reversed several conclusions during development. Treat differences of a
-few AUC points as noise unless an interval says otherwise.
+**Eight episodes is still a small sample.** Doubling it from four reversed
+several conclusions during development. Treat differences of a few AUC points
+as noise unless an interval says otherwise.
 
-**It detects rather than forecasts.** At twelve months the ensemble is at 0.611
-and CFNAI at 0.630, both modest. Anything needing warning rather than
-confirmation should read the caveats in
-[Is It Useful Downstream?](#is-it-useful-downstream) first.
+**It detects rather than forecasts.** At twelve months the ensemble is at 0.672
+— better than CFNAI's 0.631, but modest in absolute terms.
 
 **COVID was missed in real time.** The 2020 recession lasted two months; monthly
-macro data published with a lag physically cannot resolve it. That is a
-structural limit of the approach, not a tuning problem.
+macro data published with a lag physically cannot resolve it. A business-cycle
+model *should* miss a policy-induced two-month stop: the DFM, the
+Markov-switching model and the probit all assume recessions emerge from a
+slowly-evolving latent state, and February 2020 had none of that.
 
 Reproduce with:
 
@@ -551,7 +551,7 @@ Reproduce with:
 python scripts/build_features.py --step 1 --start 1967-01-31
 ```
 
-**This takes several hours** — 670 separate model fits, which is the point: a
+**This takes several hours** — 690 separate model fits, which is the point: a
 cheaper history would not be point-in-time. Results cache incrementally, so an
 interrupted run resumes. `data/` is gitignored, so a fresh clone pays this cost
 once before `scripts/benchmark_features.py` will run. Use `--step 3` while
@@ -638,6 +638,7 @@ ones it produces now.
 | Allocation backtest charged no transaction costs | Turnover was computed and reported but never deducted, flattering a strategy that rotates most of the book at a regime switch | `Backtester(transaction_cost_bps=10.0)`, charged on the L1 weight change |
 | **The GDP nowcast was never calibrated.** FRED stamps `GDPC1` at the *start* of its quarter while resampling the monthly factors gives quarter *ends*, so the two indexes never intersected | `_calibrate_gdp` raised "Only 0 common quarters", the exception was caught, and every nowcast used a hard-coded 2.5% trend with a fabricated band — while the README advertised an OLS-calibrated figure | GDP is rolled onto quarter-ends before aligning. The fitted interval is much wider than the fabricated one, which is the honest width |
 | **The EM diverged on panels spanning 2020**, producing NaN loadings; the failure surfaced only later inside varimax's SVD as "SVD did not converge" | 40 of 710 walk-forward windows died, every one in 2020 or later — so the failures clustered on exactly the dates a live dashboard asks about | The EM stops on non-finite parameters and keeps the last finite estimate; varimax refuses non-finite input; the Kalman filter's `pinv` retries with ridge regularisation |
+| **There was no inflation factor, and two rates factors had no name.** At K=4 the price series loaded at 0.01-0.17 on every factor. The match-quality metric compared anchors to a factor's *average* loading, which flatters a low-magnitude factor — "inflation" scored 1.81 on a factor whose top loadings were BAA, the regional-Fed surveys and `CREDIT_SPREAD` | With no names for the yield-curve and long-rates factors, whichever label was left over absorbed them — which is how `labor_market` became a yield-curve factor in the first place | Quality is measured against the 90th-percentile loading, not the average; `yield_curve` and `long_rates` are named and anchored; the default is K=5 with all five factors evidenced (0.92-2.21). Ensemble AUC rose 0.919 → 0.950 and Brier 0.0830 → 0.0699 |
 | **A factor's *name* was trusted where the loadings did not support it.** `labor_market` was assigned to a factor whose strongest loadings were BAA, AAA and GS10 — bond yields — and the regime model was fitted on it by name. Anchor sets also overlapped (`PAYEMS` served two names), making the assignment ill-posed and the tie-break arbitrary | The recession probability tracked the level of interest rates: the RSM read 99.9% while every other signal was calm | Anchor sets are disjoint; the DFM reports a match-quality score per name and warns when one is not evidenced; the RSM selects factors by that score rather than by label. RSM went 0.999 → 0.003 and saturation 90% → 2% |
 | **Three of four signals reported the 0.5 fallback as if it were a reading.** Publication lags mask the last month or two of every series — by design — but the ensemble read `.iloc[-1]`, saw NaN and fell back to 0.5. Separately, `max_column_missing` of 0.9 kept the *quarterly* `DRTSCILM` in a monthly panel, where it is 67% missing, and requiring it non-NaN then dropped two rows in three and emptied the probit's training set | The dashboard showed "Probit 50.0%", indistinguishable from a genuine coin-flip reading, and the headline probability averaged fill values with real ones | Signals use the latest *published* observation and report its date; the headline is computed from those point estimates so it cannot disagree with the breakdown beside it; the column threshold is 0.5 and the quarterly feature is gone |
 | **The probit never trained in 64% of months.** `fit()` dropped every row containing a NaN, so one feature with no data in the training window emptied the whole training set; the exception was caught and the signal left at its 0.5 default | Measured as AUC 0.718 and "below chance beyond nine months", prompting a confident structural story about 1970s oil shocks. It was not underperforming — it was not running. Alive, it scores **0.901** | Columns are screened before rows: a feature absent from the window is excluded from the fit and from prediction. Partial missingness is imputed with training-fold means |

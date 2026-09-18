@@ -190,8 +190,10 @@ class DynamicFactorModel:
         # matched to anchor loadings rather than assumed positionally.
         self._matched_factor_names: list[str] | None = None
         # Anchor-loading strength per assigned name, relative to the
-        # factor's average loading.  Below ~1.0 the name is not
-        # evidenced and should not be trusted by downstream code.
+        # factor's 90th-percentile loading.  Around 1.0 means the
+        # anchors are as strong as the series that define the factor;
+        # well below that, the name is not evidenced and downstream
+        # code should not select the factor by it.
         self._factor_match_quality: dict[str, float] = {}
         self._A: np.ndarray | None = None
         self._Q: np.ndarray | None = None
@@ -572,9 +574,13 @@ class DynamicFactorModel:
             "PAYEMS", "JTSJOL", "CES0500000003", "TEMPHELPS", "AWHAETP",
         ],
         "inflation": ["CPIAUCSL", "CPILFESL", "PCEPI", "PCEPILFE", "PPIFIS"],
-        "financial_stress": [
-            "BAA10Y", "BAMLH0A0HYM2", "VIXCLS", "NFCI", "TEDRATE",
-        ],
+        "financial_stress": ["NFCI", "ANFCI", "STLFSI2", "VIXCLS", "TEDRATE"],
+        # The panel contains two distinct rates factors that earlier
+        # configurations had no name for, so they were silently absorbed
+        # by whichever label the assignment had left over — which is how
+        # "labor_market" came to be a yield-curve factor.
+        "yield_curve": ["TERM_SPREAD", "T10Y3M", "T10Y2Y", "DFF", "TB3MS"],
+        "long_rates": ["GS10", "AAA", "T10YIE", "T5YIE"],
     }
 
     def _match_factors_to_names(
@@ -646,9 +652,17 @@ class DynamicFactorModel:
             if not idx:
                 self._factor_match_quality[names[j]] = float("nan")
                 continue
+            # Compare the anchors against the factor's *strongest*
+            # loadings, not its average.  An average-based ratio flatters
+            # a low-magnitude factor: at K=5 the CPI anchors scored 1.81
+            # on a factor whose top loadings were BAA, the regional-Fed
+            # surveys and CREDIT_SPREAD, with no price series anywhere
+            # near the top — the denominator was simply small.  Measuring
+            # against the 90th percentile asks the question that matters:
+            # are the anchors among the series that define this factor?
             anchor_strength = float(np.mean(np.abs(loadings[idx, k])))
-            typical = float(np.mean(np.abs(loadings[:, k]))) or 1.0
-            ratio = anchor_strength / typical
+            leading = float(np.quantile(np.abs(loadings[:, k]), 0.9)) or 1.0
+            ratio = anchor_strength / leading
             self._factor_match_quality[names[j]] = ratio
             if ratio < 1.0:
                 strongest = int(np.argmax(np.abs(loadings[:, k])))
