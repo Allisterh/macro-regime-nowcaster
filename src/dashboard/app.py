@@ -370,11 +370,42 @@ else:
     # 2. Key metrics row
     # ==================================================================
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("GDP Nowcast", f"{result.gdp_nowcast:.2f}%",
-              f"CI: [{result.gdp_ci_lower:.1f}%, {result.gdp_ci_upper:.1f}%]")
+
+    # Streamlit renders a metric's delta with an arrow and a colour, which
+    # reads as a *change* and as good news. A confidence interval is
+    # neither, so it goes in the label and the arrow is turned off.
+    ci_width = result.gdp_ci_upper - result.gdp_ci_lower
+    m1.metric(
+        "GDP Nowcast",
+        f"{result.gdp_nowcast:.2f}%",
+        f"90% CI [{result.gdp_ci_lower:.1f}%, {result.gdp_ci_upper:.1f}%]",
+        delta_color="off",
+    )
     m2.metric("Recession Prob", f"{p_recession:.1%}")
     m3.metric("Current Regime", regime.title())
-    m4.metric("Model Signals", f"{len(result.ensemble_detail)} active")
+
+    # "N active" counted len(ensemble_detail), which includes the
+    # "ensemble" entry itself — so four signals were reported as five —
+    # and counted components carrying zero weight as though they were
+    # contributing.
+    weights = data.get("weights", {})
+    signal_keys = [k for k in result.ensemble_detail if k != "ensemble"]
+    weighted = [k for k in signal_keys if weights.get(k, 0.0) > 0]
+    m4.metric(
+        "Signals Weighted",
+        f"{len(weighted)} of {len(signal_keys)}",
+        ", ".join(sorted(weighted)) or "none",
+        delta_color="off",
+    )
+
+    if ci_width > 8.0:
+        st.caption(
+            f":warning: The GDP interval spans {ci_width:.0f} percentage "
+            f"points. The factors explain little quarter-to-quarter GDP "
+            f"variation — the residual standard error is inflated by the "
+            f"2020 quarters — so treat the point estimate as weakly "
+            f"identified rather than as a forecast."
+        )
 
     st.markdown("---")
 
