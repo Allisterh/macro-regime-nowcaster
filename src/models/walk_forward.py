@@ -174,7 +174,7 @@ def generate_features_asof(
             row[f"factor_{name}_d{h}m"] = _safe_delta(factors[name], h)
 
     # --- Ensemble components, unweighted ---
-    # The fixed 0.2/0.4/0.2/0.2 blend is a judgement call; a downstream
+    # The blend in Nowcaster.DEFAULT_WEIGHTS is a judgement call; a downstream
     # model is better placed to learn the combination, and to learn that
     # one of the components is uninformative.
     detail = result.ensemble_detail or {}

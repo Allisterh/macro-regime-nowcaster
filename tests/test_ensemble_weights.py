@@ -10,6 +10,7 @@ three-signal 0.25/0.50/0.25 split long after the model had moved on.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -156,3 +157,36 @@ def test_rsm_fits_on_the_cyclical_block_only():
         )
     assert "yield_curve" not in Nowcaster.DEFAULT_RSM_FACTORS
     assert "inflation" not in Nowcaster.DEFAULT_RSM_FACTORS
+
+
+def test_no_prose_restates_the_ensemble_blend():
+    """Documentation that spells the weights out goes stale in silence.
+
+    The README and a comment in ``walk_forward.py`` both described the
+    blend as "0.20/0.40/0.20/0.20" long after ``DEFAULT_WEIGHTS`` became
+    0 / 0.50 / 0.50 / 0.  Nothing reads those strings, so nothing caught
+    them -- the same failure as the dashboard's 0.25/0.50/0.25 sidebar,
+    and the reason this test looks at prose rather than at code.
+
+    Name the attribute instead of transcribing its value.
+    """
+    pattern = re.compile(r"\d?\.\d{1,2}/\d?\.\d{1,2}/\d?\.\d{1,2}(/\d?\.\d{1,2})?")
+
+    root = Path(__file__).resolve().parents[1]
+    targets = [root / "README.md", *(root / "src").rglob("*.py")]
+
+    offenders: list[str] = []
+    for path in targets:
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            match = pattern.search(line)
+            if match:
+                rel = path.relative_to(root).as_posix()
+                offenders.append(f"{rel}:{lineno}: {match.group(0)}")
+
+    assert not offenders, (
+        "ensemble weights are written out as a literal ratio in prose; "
+        "these go stale without failing anything. Refer to "
+        "Nowcaster.DEFAULT_WEIGHTS instead:\n  " + "\n  ".join(offenders)
+    )

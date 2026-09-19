@@ -164,8 +164,15 @@ Click **🔄 Run Nowcast** in the sidebar to fetch live data and generate result
 
 ```bash
 python scripts/build_features.py --verify   # check the generator is leak-free first
-python scripts/build_features.py            # then generate (slow; resumes from cache)
+
+# Then generate. This is the command behind every downstream number below:
+# bare `build_features.py` starts in 2000 and would not reproduce them.
+# Slow (one model fit per month) but resumes from its incremental cache.
+python scripts/build_features.py --start 1967-01-31 --step 1
 ```
+
+The data pipeline is fetched from 20 years before `--start` so the first
+window has a history to fit on; `--pipeline-start` overrides that.
 
 See [Point-in-Time Features](#point-in-time-features-for-downstream-models) for why this
 is not the same as slicing the history out of a single `Nowcaster.run()`.
@@ -284,8 +291,8 @@ assert_point_in_time(pipeline, early_cutoff="2016-12-31", late_cutoff="2019-12-3
 ```
 
 Each row carries more than a single probability, so a downstream model
-can learn its own weighting rather than inheriting the fixed
-0.20/0.40/0.20/0.20 blend:
+can learn its own weighting rather than inheriting the fixed blend in
+`Nowcaster.DEFAULT_WEIGHTS`:
 
 | Feature group | Columns |
 |---------------|---------|
