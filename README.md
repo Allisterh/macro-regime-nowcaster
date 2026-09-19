@@ -690,11 +690,12 @@ the fix and confirming its test fails.
 Six instances, each rendering a plausible number while disagreeing with the
 model: the dashboard's ensemble weights, its "N active" signal count, its
 factor-count slider, its factor-plot cap, the walk-forward's `n_factors`, and
-this README describing the blend as `0.20/0.40/0.20/0.20` long after it became
-`0/0.50/0.50/0`. Nothing reads prose or a UI string, so nothing failed. The rule
-is to name the attribute rather than transcribe its value —
+this README describing the ensemble as an equal-ish four-way blend long after it
+had become a two-signal one. Nothing reads prose or a UI string, so nothing
+failed. The rule is to name the attribute rather than transcribe its value —
 `tests/test_ensemble_weights.py` and `tests/test_dashboard_defaults.py` now fail
-when something restates one.
+when something restates one, and writing this paragraph tripped that test, which
+is the intended behaviour.
 
 The one change here that is a **modelling opinion rather than a bug fix** is the
 RSM factor restriction described under [Hamilton (1989) Markov-Switching
