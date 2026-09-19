@@ -16,8 +16,8 @@ This project implements a **real-time macroeconomic regime nowcaster** that inge
 
 ### Key Features
 
-- **Mixed-Frequency Dynamic Factor Model** — EM algorithm + Kalman filter extracts 4 interpretable latent factors from 75 noisy macro series (daily, weekly, monthly, quarterly) via Mariano–Murasawa cumulator, with varimax rotation for factor identification
-- **Ensemble Recession Detection** — Weighted combination of a CFNAI threshold, a supervised probit, the Sahm rule and a Markov-switching model. The weights are set from measured out-of-sample performance, not judgement, and the components are correlated rather than independent
+- **Mixed-Frequency Dynamic Factor Model** — EM algorithm + Kalman filter extracts 5 interpretable latent factors from 75 noisy macro series (daily, weekly, monthly, quarterly) via Mariano–Murasawa cumulator, with varimax rotation for factor identification
+- **Ensemble Recession Detection** — Weighted combination of a CFNAI threshold, a supervised probit, the Sahm rule and a Markov-switching model. The weights are set from measured out-of-sample performance, not judgement, and two of the four currently measure to zero — the components are correlated rather than independent, so adding them costs more in variance than they contribute
 - **Estrella–Mishkin Yield-Curve Probit** — Canonical NY Fed specification (12-month-ahead recession on T10Y3M) available as a standalone baseline
 - **Look-Ahead-Free Pipeline** — Expanding-window standardization, Kalman-filtered (not smoothed) factors *and* Hamilton-filtered (not Kim-smoothed) regime probabilities, ragged-edge masking with per-series publication lags, and NBER labels restricted to turning points that had actually been announced
 - **Point-in-Time Feature Generation** — `walk_forward` refits the model once per as-of date and keeps only the final row, so a feature table for a downstream model contains only values that were computable at the time; `assert_point_in_time()` enforces it
@@ -31,28 +31,30 @@ This project implements a **real-time macroeconomic regime nowcaster** that inge
 
 ### What it does, measured
 
-Everything below is from a **670-point monthly walk-forward** (1967–2025, eight
+Everything below is from a **716-point monthly walk-forward** (1967–2026, eight
 recessions), refitting at each date and reading only that fit's final row.
 Details in [Measured Real-Time Performance](#measured-real-time-performance)
 and [Is It Useful Downstream?](#is-it-useful-downstream)
 
 | | |
 |---|---|
-| Recession detection, real-time | AUC **0.950**, Brier **0.0699** |
-| …against CFNAI alone | AUC 0.863, Brier 0.1017 |
-| Discrimination vs CFNAI | **+0.087 AUC, P = 0.99** (CI excludes zero) |
-| Calibration vs CFNAI | **31% better, P = 0.98** (CI excludes zero) |
-| Forecasting 12 months out | AUC 0.672 — modest, but ahead of CFNAI's 0.631 |
+| Recession detection, real-time | AUC **0.951**, Brier **0.0685** |
+| …against CFNAI alone | AUC 0.866, Brier 0.0999 |
+| Discrimination vs CFNAI | **+0.085 AUC, P = 0.99** (CI excludes zero) |
+| Calibration vs CFNAI | **32% better, P = 0.99** (CI excludes zero) |
+| Forecasting 12 months out | AUC 0.677 — modest, but ahead of CFNAI's 0.634 |
 | Predicting forward equity returns | **no skill** (negative R² everywhere) |
-| Predicting forward vol / drawdown | **no skill either** on the full sample — an earlier positive result did not survive extending it |
+| Predicting forward volatility | **modest rank skill** from the factors — IC +0.18, positive in 5/5 folds; R² only +0.05 |
+| Predicting forward drawdown | **no skill** (negative R² everywhere) |
 | COVID, in real time | **missed** — two months is below the data's resolution |
 
 **Read this before building on it.** The ensemble beats CFNAI on both
 discrimination and calibration, with both confidence intervals excluding zero.
 But it is a coincident detector, not a forecaster: at twelve months it is
 modest, and it missed COVID entirely — correctly, since a two-month
-policy-induced stop is not a business-cycle turning point. And it showed **no
-usable skill on equity targets** under purged cross-validation. Its defensible
+policy-induced stop is not a business-cycle turning point. On equity targets under purged
+cross-validation it shows **no skill on returns or drawdown**, and only a modest
+*ranking* signal on forward volatility. Its defensible
 value is a well-calibrated recession probability, an interpretable decomposition
 of 75 series into factors that are *checked* to mean what they are named, and a
 point-in-time feature generator tested not to leak. The harness that establishes
@@ -68,16 +70,21 @@ The Streamlit dashboard provides real-time visualization of all model outputs:
 
 ### Ensemble Signal Decomposition
 
-Four independent recession signals are combined with calibrated weights:
+Four recession signals are combined with weights set by measured performance.
+Two of them currently carry zero weight — they are computed, reported and
+plotted, but do not enter the headline probability:
 
 ![Ensemble Breakdown](docs/images/ensemble_breakdown.png)
 
 | Signal | Weight | Method |
 |--------|--------|--------|
-| **Probit** | 0.40 | Supervised model trained on NBER recession dates with lagged yield curve & credit spreads (class-balanced) |
-| **RSM** | 0.20 | Hamilton (1989) Markov-switching on the *cyclical* DFM factors (real activity + labour) |
-| **CFNAI** | 0.20 | Chicago Fed MA3 < −0.7 convention (logistic-smoothed) |
-| **Sahm** | 0.20 | Sahm rule — 3-month MA unemployment minus 12-month min (logistic-smoothed) |
+| **Probit** | 0.50 | Supervised model trained on NBER recession dates with lagged yield curve & credit spreads (class-balanced) |
+| **CFNAI** | 0.50 | Chicago Fed MA3 < −0.7 convention (logistic-smoothed) |
+| **RSM** | 0.00 | Hamilton (1989) Markov-switching on the *cyclical* DFM factor (`real_activity`) |
+| **Sahm** | 0.00 | Sahm rule — 3-month MA unemployment minus 12-month min (logistic-smoothed) |
+
+The live values are `Nowcaster.DEFAULT_WEIGHTS`; per-horizon overrides are in
+`Nowcaster.HORIZON_WEIGHTS`.
 
 ### Latent Factor Dynamics
 
@@ -106,14 +113,14 @@ DataPipeline ── mixed-freq align, transform, expanding standardize, ragged-e
     │                                          └──► raw_levels_ (UNRATE, CFNAI)
     ▼                                               kept in published units for
 DynamicFactorModel (EM + Kalman)                    the threshold signals below
-    │  4 latent factors, Mariano–Murasawa cumulator, varimax rotation,
+    │  5 latent factors, Mariano–Murasawa cumulator, varimax rotation,
     │  names by loading evidence, filtered output (no look-ahead)
     │
-    ├──► Markov-Switching RSM     (wt: 0.20)  ◄── cyclical factors only
-    ├──► Recession Probit         (wt: 0.40)  ◄── NBER dates (announcement-lagged),
+    ├──► Markov-Switching RSM     (wt: 0.00)  ◄── cyclical factor only
+    ├──► Recession Probit         (wt: 0.50)  ◄── NBER dates (announcement-lagged),
     │                                             yield curve, credit spreads
-    ├──► CFNAI Signal             (wt: 0.20)  ◄── raw CFNAI level
-    ├──► Sahm Rule                (wt: 0.20)  ◄── raw unemployment level
+    ├──► CFNAI Signal             (wt: 0.50)  ◄── raw CFNAI level
+    ├──► Sahm Rule                (wt: 0.00)  ◄── raw unemployment level
     │
     ▼
 Ensemble P(Recession) + GDP Nowcast
@@ -225,10 +232,10 @@ $$F_t | S_t = j \sim \mathcal{N}(\mu_j, \Sigma_j)$$
 
 - **Filtered** probabilities via the Hamilton (1989) forward recursion — the default, and the only estimate safe to use as a historical series
 - **Smoothed** probabilities via the Kim (1994) backward smoother, available as `smoothed_probs_` for retrospective turning-point dating (these condition on *t+1..T* and must not feed a supervised model)
-- Fitted on the **cyclical** factor block (`real_activity`, `labor_market`) rather than all four.
+- Fitted on the **cyclical** factor block (`real_activity`) rather than all of them.
   Hamilton's regime variable is the business-cycle state; including the inflation and
   financial-stress factors lets the mixture split on an inflation regime instead. Measured
-  over the full sample: all four factors give AUC 0.705 with 49% average recession occupancy
+  over the full sample: every factor together gives AUC 0.705 with 49% average recession occupancy
   (it fires half the time), the cyclical block gives **AUC 0.820** at 33%. Configurable via
   `Nowcaster(rsm_factors=...)`; pass `None` to use every factor.
 - Regime labels are assigned by ascending mean, so index 0 is always the recession state.
@@ -484,24 +491,24 @@ actually went wrong at some point:
 
 ## Measured Real-Time Performance
 
-Every figure below comes from a **walk-forward**: 690 monthly refits from 1967
+Every figure below comes from a **walk-forward**: 716 monthly refits from 1967
 to 2026, each fitted only on data available at that date and contributing only
 its own final row. No number here is in-sample.
 
 The sample covers **eight** recessions — 1969-70, 1973-75, 1980, 1981-82,
-1990-91, 2001, 2007-09 and 2020 — and 85 recession months out of 690. Reaching
+1990-91, 2001, 2007-09 and 2020 — and 85 recession months out of 716. Reaching
 back past 1980 is what the reconstructed `TERM_SPREAD` and `CREDIT_SPREAD`
 series are for: FRED's ready-made `T10Y3M` and `BAA10Y` start only in 1982 and
 1986, which would cap the evidence at four recessions.
 
 | Signal | AUC | Brier |
 |--------|-----|-------|
-| **Ensemble** | **0.950** | **0.0699** |
-| Probit | 0.933 | 0.0771 |
-| CFNAI signal alone | 0.863 | 0.1017 |
-| Sahm rule | 0.782 | 0.1777 |
-| Markov-switching (RSM) | 0.543 | 0.5317 |
-| *Constant forecast at the 12.3% base rate* | 0.500 | 0.1118 |
+| **Ensemble** | **0.951** | **0.0685** |
+| Probit | 0.934 | 0.0755 |
+| CFNAI signal alone | 0.866 | 0.0999 |
+| Sahm rule | 0.787 | 0.1733 |
+| Markov-switching (RSM) | 0.569 | 0.4806 |
+| *Constant forecast at the 11.9% base rate* | 0.500 | 0.1046 |
 
 ### Does it beat CFNAI?
 
@@ -511,11 +518,18 @@ episodes, with weights fixed in advance:
 
 | Metric | Ensemble − CFNAI | 95% CI | Verdict |
 |--------|------------------|--------|---------|
-| **AUC** | **+0.087** | **[+0.010, +0.221]** | **ensemble wins (P = 0.99)** |
-| **Brier** | **−0.0318** | **[−0.0800, −0.0014]** | **ensemble wins (P = 0.98)** |
+| **AUC** | **+0.085** | **[+0.012, +0.215]** | **ensemble wins (P = 0.99)** |
+| **Brier** | **−0.0314** | **[−0.0781, −0.0026]** | **ensemble wins (P = 0.99)** |
 
 **Yes, on both, and both intervals exclude zero.** It discriminates better *and*
-is better calibrated — a 31% improvement in Brier score over the published index.
+is better calibrated — a 32% improvement in Brier score over the published index.
+
+These figures survived the feature-panel rebuild almost unchanged (ensemble AUC
+0.950 → 0.951, Brier 0.0699 → 0.0685), even though the panel they were first
+measured on contained 25 rows of fabricated output. That is worth stating
+plainly: the bad rows were not driving this result. The signal they *did* move
+is the RSM, which is the one they corrupted — AUC 0.545 → 0.569, Brier 0.5217
+→ 0.4806.
 
 This is a change from an earlier configuration, where the AUC edge was inside
 the noise band and only the calibration advantage held. The difference is not a
@@ -527,12 +541,12 @@ It also leads at **every** horizon:
 
 | Horizon | Ensemble | CFNAI | Probit |
 |---------|----------|-------|--------|
-| 0m | **0.950** | 0.863 | 0.933 |
-| 3m | **0.889** | 0.805 | 0.854 |
-| 6m | **0.811** | 0.730 | 0.760 |
-| 9m | **0.734** | 0.661 | 0.670 |
-| 12m | **0.672** | 0.631 | 0.594 |
-| 18m | **0.596** | 0.590 | 0.540 |
+| 0m | **0.951** | 0.866 | 0.934 |
+| 3m | **0.892** | 0.808 | 0.856 |
+| 6m | **0.815** | 0.732 | 0.761 |
+| 9m | **0.738** | 0.664 | 0.669 |
+| 12m | **0.677** | 0.634 | 0.588 |
+| 18m | **0.597** | 0.591 | 0.534 |
 
 The dashboard plots these with block-bootstrap bands. The per-horizon gaps
 beyond 0m are not individually significant, and the bands overlap.
@@ -558,7 +572,7 @@ Reproduce with:
 python scripts/build_features.py --step 1 --start 1967-01-31
 ```
 
-**This takes several hours** — 690 separate model fits, which is the point: a
+**This takes several hours** — 716 separate model fits, which is the point: a
 cheaper history would not be point-in-time. Results cache incrementally, so an
 interrupted run resumes. `data/` is gitignored, so a fresh clone pays this cost
 once before `scripts/benchmark_features.py` will run. Use `--step 3` while
@@ -568,51 +582,84 @@ iterating.
 
 The reason to build this rather than read CFNAI off the Chicago Fed website is
 that its output should be worth more than the free index it partly consumes.
-`scripts/benchmark_features.py` tests that on three-month forward NASDAQ
-targets under purged and embargoed walk-forward CV.
+`scripts/benchmark_features.py` tests that on forward NASDAQ targets under
+purged and embargoed walk-forward CV.
 
-Two rules make it honest: features join on **`knowable_at`**, not the reference
-month, and folds are **purged and embargoed** — on a target built from
+Three rules make it honest: features join on **`knowable_at`**, not the
+reference month; folds are **purged and embargoed** — on a target built from
 overlapping forward windows, shuffled k-fold reports ~+0.69 correlation where
-the truth is zero (`tests/test_purged_cv.py` asserts exactly this).
+the truth is zero (`tests/test_purged_cv.py` asserts exactly this); and the
+ridge is **standardised with its penalty selected inside each training fold**,
+because an L2 penalty on raw columns is decided by the units each feature
+happens to be recorded in rather than by the data.
 
-Ridge, 4–5 folds, 670 monthly observations (1967–2025). IC is the mean fold
-correlation; R² is measured against the *training* mean — the naive forecast
-actually available at prediction time.
+4–5 folds, 712 monthly observations (1967–2026), 3-month horizon. IC is the
+mean fold correlation; R² is measured against the *training* mean — the naive
+forecast actually available at prediction time.
 
 | Feature set | return IC | return R² | vol IC | vol R² | drawdown IC | drawdown R² |
 |---|---|---|---|---|---|---|
-| CFNAI only | +0.01 | −0.01 | −0.21 | −0.05 | −0.15 | −0.02 |
-| p_recession only | +0.05 | −0.01 | −0.12 | −0.05 | −0.11 | −0.01 |
-| regime signals (4) | −0.00 | −0.04 | −0.06 | −0.30 | −0.02 | −0.21 |
-| factors only | −0.05 | −0.22 | +0.07 | −0.16 | +0.02 | −0.31 |
-| full regime panel | −0.06 | −0.33 | −0.05 | −0.55 | −0.06 | −0.69 |
+| CFNAI only | +0.00 | −0.01 | −0.21 | −0.04 | −0.15 | −0.01 |
+| p_recession only | −0.11 | −0.00 | −0.10 | −0.04 | +0.20 | −0.00 |
+| regime signals (4) | −0.01 | −0.01 | −0.05 | −0.06 | +0.11 | −0.01 |
+| **factors only** | −0.01 | −0.08 | **+0.18** | **+0.05** | +0.09 | −0.14 |
+| full regime panel | −0.01 | −0.54 | +0.17 | −2.34 | +0.13 | −1.77 |
 
-**Nothing here predicts equity outcomes.** Every R² is negative: no feature set
-beats predicting the historical average, for returns, volatility or drawdown.
+**Direction and drawdown: no.** Every R² is negative. Nothing here beats
+predicting the historical average for returns or for worst peak-to-trough move.
 
-This *reverses* an earlier finding. On the 1990–2026 sample the same benchmark
-showed genuine risk predictability — volatility IC +0.40 with positive R², and
-drawdown +0.26. Extending to 1967 removed it, and several ICs changed sign.
-Either the relationship is unstable across eras, or the shorter sample was
-showing noise; on this evidence there is no way to tell, and the honest reading
-is that the effect was never established.
+**Forward volatility: a real but modest rank signal, and only from the
+factors.** The latent factors are the one feature set that beats the naive
+forecast on any target (vol R² +0.05), and the discrimination is the part that
+holds up:
 
-**Fewer features still win.** The single-column sets are least bad on every
-target, and the full 32-column panel is worst everywhere (vol R² −0.55,
-drawdown −0.69). With a handful of recessions there is nothing to support a
-wide fit; extra columns only add variance.
+| | IC | R² |
+|---|---|---|
+| 3-month horizon | +0.178 | +0.054 |
+| 6-month horizon | +0.168 | +0.006 |
+| 12-month horizon | +0.181 | −0.034 |
+
+Per fold at 3 months, the IC is positive in **5 of 5** folds spanning five
+decades (+0.100, +0.293, +0.194, +0.144, +0.157) while R² is positive in only
+3 of 5. The GBM agrees on the sign (+0.135) and disagrees on R², so the ranking
+result is not an artifact of one estimator. Read that as: the factors carry
+consistent information about *which* periods will be more volatile than others,
+and much weaker information about *how* volatile. Rank-based use is supported;
+a level forecast is not.
+
+This is a change from what this section said before, and two things changed
+under it. The panel it was computed from contained 25 rows where a failed DFM
+fit had been written out as zeros, and the benchmark's ridge was fitted to
+unstandardised columns spanning eleven orders of magnitude, so the effective
+regularisation was set by units. Both are fixed and described in the
+[Correctness Audit](#correctness-audit). The earlier reading — that *nothing*
+predicts anything — was measured on data that was partly fabricated.
+
+It is still worth treating the volatility result carefully. An earlier version
+of this benchmark found a much larger one (vol IC +0.40 on 1990–2026) that did
+not survive extending the sample to 1967. This one is a third the size, but it
+is measured on the full sample rather than a subsample of it, positive in every
+fold, and agreed on by both estimators — which is a stronger basis than the
+finding it replaces, not the same claim restated.
+
+**Fewer features still win, and by more than before.** The full 35-column panel
+is worst everywhere, and dramatically so once the ridge is properly scaled
+(vol R² −2.34, drawdown −1.77): with standardisation every column competes on
+equal terms, and 35 of them against a handful of recessions is a variance
+machine. The single-column and factor-only sets are the only ones worth running.
 
 ### What this means if you were planning to use it
 
 - **Directional prediction: no.** Nothing in this repository supports it.
-- **Risk conditioning: unproven.** It looked promising on 1990–2026 and did not
-  survive 1967–2025. Re-run the benchmark on whatever sample you intend to
-  trade before relying on it.
+- **Volatility ranking: modestly supported.** `factor_*` columns, positive IC in
+  every fold over 1967–2026 and under both estimators. Use them to rank periods
+  by expected volatility, not to forecast its level, and size the expectation to
+  an IC near +0.18.
+- **Drawdown: no**, despite a +0.20 IC on `p_recession` — the R² is negative, so
+  the ordering carries some information the magnitude does not support.
 - **Regime state as a conditioner or interaction term** remains the most
   defensible use, and the calibration result above is the reason to prefer
-  `p_recession` over a raw indicator for it — but that is an argument about the
-  quality of the probability, not evidence of trading edge.
+  `p_recession` over a raw indicator for it.
 
 ```bash
 python scripts/benchmark_features.py --horizon 3
@@ -700,7 +747,7 @@ is the intended behaviour.
 The one change here that is a **modelling opinion rather than a bug fix** is the
 RSM factor restriction described under [Hamilton (1989) Markov-Switching
 Model](#hamilton-1989-markov-switching-model): fitting on the cyclical block
-instead of all four factors lifts AUC from 0.705 to 0.820. Set
+instead of every factor lifts AUC from 0.705 to 0.820. Set
 `Nowcaster(rsm_factors=None)` to restore the previous behaviour.
 
 ---

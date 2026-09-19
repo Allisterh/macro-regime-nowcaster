@@ -190,3 +190,43 @@ def test_no_prose_restates_the_ensemble_blend():
         "these go stale without failing anything. Refer to "
         "Nowcaster.DEFAULT_WEIGHTS instead:\n  " + "\n  ".join(offenders)
     )
+
+
+# A markdown table row:  | **Probit** | 0.50 | ...
+_TABLE_ROW = r"^\|\s*\*\*{name}\*\*\s*\|\s*([0-9.]+)\s*\|"
+# An architecture-diagram entry:  Recession Probit  (wt: 0.50)
+_DIAGRAM_ENTRY = r"{name}[^\n]*?\(wt:\s*([0-9.]+)\)"
+
+
+def test_documented_signal_weights_match_the_model():
+    """A weights table in the README must agree with DEFAULT_WEIGHTS.
+
+    The prose check above only catches a slash-separated ratio. The
+    README also carried a markdown table *and* an ASCII architecture
+    diagram, each listing per-signal weights, and both still showed the
+    superseded four-way split long after the model had moved to two
+    signals. Same defect, different syntax — which is the argument for
+    checking the values rather than one way of writing them.
+    """
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+    problems: list[str] = []
+    for signal, weight in Nowcaster.DEFAULT_WEIGHTS.items():
+        for label, pattern, flags in (
+            ("table row", _TABLE_ROW, re.I | re.M),
+            ("diagram entry", _DIAGRAM_ENTRY, re.I),
+        ):
+            for found in re.finditer(pattern.format(name=signal), readme, flags):
+                shown = float(found.group(1))
+                if abs(shown - weight) > 1e-9:
+                    problems.append(
+                        f"{label} for {signal}: README says {shown}, "
+                        f"model says {weight}"
+                    )
+
+    assert not problems, (
+        "the README documents ensemble weights that disagree with "
+        "Nowcaster.DEFAULT_WEIGHTS:\n  " + "\n  ".join(problems)
+    )
