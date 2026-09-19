@@ -121,13 +121,55 @@ def evaluate(X: pd.DataFrame, y: pd.Series, model_fn, cv) -> tuple[float, float,
     )
 
 
+
+
+def build_models() -> dict:
+    """The estimators the benchmark compares, as name -> factory.
+
+    Module level rather than inside main() so the scale-invariance
+    property can be asserted in a test.
+    """
+    from sklearn.ensemble import GradientBoostingRegressor
+    from sklearn.linear_model import RidgeCV
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    # Ridge is scaled and has its penalty chosen, not fixed.
+    #
+    # This was `Ridge(alpha=1.0)` on raw columns. The L2 penalty is not
+    # scale-invariant, so with features spanning probabilities (sd ~ 0.1)
+    # and `expected_recession_duration` (sd ~ 3e10, a 7.7e11x ratio) the
+    # effective regularisation was set by units rather than by the data.
+    # Measured on the old panel, standardising alone moved the full-panel
+    # R² from -0.299 to -3.355 on returns: the unstandardised fit had been
+    # accidentally shrinking the wide columns to nothing, which is
+    # regularisation by accident, and not reproducible under a change of
+    # units. The verdict did not change — every R² is negative either way
+    # — but the numbers were an artifact of scale.
+    #
+    # StandardScaler and RidgeCV both sit inside the pipeline, so they are
+    # refitted on each training fold and never see the test fold. Alpha is
+    # chosen by RidgeCV's leave-one-out GCV on the training fold only;
+    # with overlapping forward windows that can favour a slightly small
+    # alpha, which is a conservative direction here (it can only make the
+    # features look worse, never better).
+    alphas = np.logspace(-2, 4, 13)
+    return {
+        "ridge": lambda: make_pipeline(
+            StandardScaler(), RidgeCV(alphas=alphas)
+        ),
+        # Trees split on order, not magnitude, so the GBM was never
+        # affected by the scaling problem and is left as it was.
+        "gbm": lambda: GradientBoostingRegressor(
+            random_state=0, n_estimators=100, max_depth=2
+        ),
+    }
+
+
 def main() -> int:
     args = parse_args()
     load_dotenv()
     setup_logging(level=args.log_level)
-
-    from sklearn.ensemble import GradientBoostingRegressor
-    from sklearn.linear_model import Ridge
 
     path = Path(args.features)
     if not path.exists():
@@ -166,12 +208,8 @@ def main() -> int:
         "factors only": [c for c in X.columns if c.startswith("factor_")],
         "full regime panel": list(X.columns),
     }
-    models = {
-        "ridge": lambda: Ridge(alpha=1.0),
-        "gbm": lambda: GradientBoostingRegressor(
-            random_state=0, n_estimators=100, max_depth=2
-        ),
-    }
+    models = build_models()
+
     cv = PurgedWalkForward(
         n_splits=args.splits, label_horizon=args.horizon,
         embargo=args.embargo, min_train=80,
