@@ -329,6 +329,10 @@ def _run_nowcast(start: str, end: str, n_fac: int):
             # by design, so a reading is typically one or two months old.
             "signal_as_of": dict(getattr(nowcaster, "_signal_as_of", {}) or {}),
             "weights": dict(nowcaster.ensemble_weights),
+            # How well the loadings support each factor name.
+            "factor_quality": dict(
+                getattr(nowcaster._dfm, "_factor_match_quality", {}) or {}
+            ),
         }, None
     except Exception as exc:  # noqa: BLE001
         logger.exception("Nowcast run failed")
@@ -585,20 +589,29 @@ else:
     # ==================================================================
     st.subheader("Latent Factors (DFM)")
     factor_cols = factors.columns.tolist()
-    n_cols = min(len(factor_cols), 4)
+    quality = data.get("factor_quality", {})
+
+    # Every factor gets a plot. This used to cap at four
+    # (min(len(factor_cols), 4)) and lay them out in a single row, so the
+    # fifth factor silently vanished when the default moved to K=5 —
+    # another literal restating something the model owns. Wrap instead.
+    per_row = 4
 
     # Determine the actual data range from factor values.
     # The Kalman smoother fills early rows with near-zero values when
     # few series are available; trim those by finding the first row
     # where any factor deviates meaningfully from zero (|z| > 0.05).
-    factors_plot = factors[factor_cols[:n_cols]].copy()
+    factors_plot = factors[factor_cols].copy()
     meaningful = factors_plot.abs().max(axis=1) > 0.05
     if meaningful.any():
         factors_plot = factors_plot.loc[meaningful.idxmax():]
 
-    factor_chart_cols = st.columns(n_cols)
-    for i, col_name in enumerate(factor_cols[:n_cols]):
-        with factor_chart_cols[i]:
+    row_slots: list = []
+    for i, col_name in enumerate(factor_cols):
+        if i % per_row == 0:
+            remaining = len(factor_cols) - i
+            row_slots = st.columns(min(per_row, remaining))
+        with row_slots[i % per_row]:
             series = factors_plot[col_name].dropna()
             # Clip to ±3σ for display only (model uses unclipped values)
             series_display = series.clip(-3.0, 3.0)
@@ -616,8 +629,19 @@ else:
             _add_nber_shading(fig_f)
 
             clean_name = col_name.replace("_", " ").title()
+            # Show how well the loadings support the name. A factor whose
+            # anchors are weak is a label of convenience, and the reader
+            # should be able to see that on the plot rather than trusting
+            # the title — this is exactly how a yield-curve factor came to
+            # be read as "labor market".
+            score = quality.get(col_name)
+            if score is not None and score == score:
+                mark = "✓" if score >= 1.0 else "?"
+                title_text = f"{clean_name}  <sub>{mark} {score:.2f}</sub>"
+            else:
+                title_text = clean_name
             fig_f.update_layout(
-                title=dict(text=clean_name, font=dict(size=13)),
+                title=dict(text=title_text, font=dict(size=13)),
                 height=200,
                 margin=dict(t=35, b=30, l=10, r=10),
                 xaxis=dict(
@@ -631,6 +655,19 @@ else:
                 yaxis=dict(title="z-score", range=[-3.5, 3.5]),
             )
             st.plotly_chart(fig_f, use_container_width=True)
+
+    if quality:
+        weak = [n for n, v in quality.items() if v == v and v < 1.0]
+        st.caption(
+            "The number beside each name is how strongly that factor's "
+            "anchor series load on it, relative to the factor's own "
+            "90th-percentile loading — ✓ means the name is supported by "
+            "the loadings, ? means it is a label of convenience."
+            + (
+                f" Currently weak: {', '.join(sorted(weak))}."
+                if weak else " All factor names are currently evidenced."
+            )
+        )
 
     st.markdown("---")
 
