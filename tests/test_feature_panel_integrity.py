@@ -1,0 +1,178 @@
+"""The downstream feature panel must not contain fabricated values.
+
+Three defects found in a shipped ``data/features.csv`` of 690 rows, none
+of which raised anything:
+
+1. 25 rows had every factor exactly ``0.0``, ``signal_rsm`` exactly 0.5
+   and ``p_stay_recession`` exactly 0.0 — the DFM had returned zeros
+   rather than failing, and the row was written with a full set of
+   plausible numbers. They clustered in 2020 and later, 11 of them in
+   the final 25 months.
+2. ``expected_recession_duration`` reached 7.5e11 months, because
+   ``1 / (1 - p)`` was guarded only against ``p == 1.0`` exactly and an
+   estimated ``p`` of 0.9999999999946 clears that test.
+3. ``generate_features_asof`` defaulted to ``n_factors=4`` after the
+   validated default became 5, so the documented way to rebuild the
+   panel produced an unmeasured configuration — and with five names
+   competing for four factors, ``long_rates`` was dropped entirely.
+
+These tests use a stubbed Nowcaster rather than a real fit, so they run
+in milliseconds and stay in the fast suite; the class of bug they guard
+is precisely the kind that a slow, rarely-run test would not catch.
+"""
+
+from __future__ import annotations
+
+import inspect
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from src.models.nowcaster import Nowcaster
+from src.models.walk_forward import generate_features_asof
+
+_IDX = pd.date_range("2000-01-31", periods=60, freq="ME")
+
+
+class _StubResult:
+    recession_probability = 0.30
+    ensemble_detail = {"rsm": 0.5, "probit": 0.2, "cfnai": 0.1, "sahm": 0.1}
+    gdp_nowcast = 2.0
+    gdp_ci_lower = 0.0
+    gdp_ci_upper = 4.0
+
+
+class _StubRSM:
+    def __init__(self, stay_recession: float) -> None:
+        self._stay = stay_recession
+
+    def get_transition_matrix(self) -> np.ndarray:
+        return np.array([[self._stay, 1.0 - self._stay], [0.05, 0.95]])
+
+
+def _stub_nowcaster_factory(factor_values: float, stay_recession: float):
+    """A Nowcaster replacement that fits nothing and returns fixed state."""
+
+    class _StubNowcaster:
+        DEFAULT_FACTOR_NAMES = Nowcaster.DEFAULT_FACTOR_NAMES
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self._last_factors = pd.DataFrame(
+                factor_values, index=_IDX, columns=["a", "b"],
+            )
+            self._ensemble_recession_ts = pd.Series(0.3, index=_IDX)
+            self._rsm = _StubRSM(stay_recession)
+
+        def run(self, end_date=None):
+            return _StubResult()
+
+    return _StubNowcaster
+
+
+def _patch(monkeypatch, factor_values: float, stay_recession: float) -> None:
+    monkeypatch.setattr(
+        "src.models.walk_forward.Nowcaster",
+        _stub_nowcaster_factory(factor_values, stay_recession),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1. A failed fit must not be written as a row of zeros
+# ---------------------------------------------------------------------------
+
+
+def test_all_zero_factors_raise_instead_of_being_written(monkeypatch):
+    """The panel skips a failed window; it must never fabricate one."""
+    _patch(monkeypatch, factor_values=0.0, stay_recession=0.8)
+
+    with pytest.raises(RuntimeError, match="all-zero factors"):
+        generate_features_asof(
+            object(), "2015-12-31", respect_nber_announcement_lag=False,
+        )
+
+
+def test_ordinary_factors_are_accepted(monkeypatch):
+    """The guard must not reject a healthy fit."""
+    _patch(monkeypatch, factor_values=0.4, stay_recession=0.8)
+
+    row = generate_features_asof(
+        object(), "2015-12-31", respect_nber_announcement_lag=False,
+    )
+    assert row["factor_a"] == pytest.approx(0.4)
+
+
+def test_a_single_zero_factor_is_not_rejected(monkeypatch):
+    """Only an entirely zero row indicates failure, not one zero column."""
+    factory = _stub_nowcaster_factory(0.0, 0.8)
+
+    class _OneNonZero(factory):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._last_factors["b"] = 0.7
+
+    monkeypatch.setattr("src.models.walk_forward.Nowcaster", _OneNonZero)
+
+    row = generate_features_asof(
+        object(), "2015-12-31", respect_nber_announcement_lag=False,
+    )
+    assert row["factor_a"] == 0.0
+    assert row["factor_b"] == pytest.approx(0.7)
+
+
+# ---------------------------------------------------------------------------
+# 2. Expected duration must stay on a usable scale
+# ---------------------------------------------------------------------------
+
+
+def test_expected_duration_is_bounded_by_the_sample(monkeypatch):
+    """A near-unit persistence must saturate, not return 1e13."""
+    _patch(monkeypatch, factor_values=0.4, stay_recession=1.0 - 1e-13)
+
+    row = generate_features_asof(
+        object(), "2015-12-31", respect_nber_announcement_lag=False,
+    )
+    duration = row["expected_recession_duration"]
+    assert np.isfinite(duration)
+    assert duration <= len(_IDX), (
+        f"expected_recession_duration is {duration:.3g}, beyond what a "
+        f"{len(_IDX)}-observation sample can identify"
+    )
+
+
+def test_exact_unit_persistence_saturates_rather_than_returning_nan(monkeypatch):
+    _patch(monkeypatch, factor_values=0.4, stay_recession=1.0)
+
+    row = generate_features_asof(
+        object(), "2015-12-31", respect_nber_announcement_lag=False,
+    )
+    assert row["expected_recession_duration"] == pytest.approx(len(_IDX))
+
+
+def test_ordinary_persistence_is_left_alone(monkeypatch):
+    """The cap must not distort values the sample can actually resolve."""
+    _patch(monkeypatch, factor_values=0.4, stay_recession=0.9)
+
+    row = generate_features_asof(
+        object(), "2015-12-31", respect_nber_announcement_lag=False,
+    )
+    assert row["expected_recession_duration"] == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# 3. The factor count belongs to the model
+# ---------------------------------------------------------------------------
+
+
+def test_default_factor_count_comes_from_the_model():
+    """A literal here silently builds the panel at the wrong K."""
+    default = inspect.signature(
+        generate_features_asof
+    ).parameters["n_factors"].default
+
+    assert default == len(Nowcaster.DEFAULT_FACTOR_NAMES), (
+        f"generate_features_asof defaults to n_factors={default} while the "
+        f"model defines {len(Nowcaster.DEFAULT_FACTOR_NAMES)} factors; the "
+        f"downstream panel would be built at an unvalidated K"
+    )

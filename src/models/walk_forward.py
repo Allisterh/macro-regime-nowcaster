@@ -49,6 +49,13 @@ MAX_PUBLICATION_LAG = pd.Timedelta(days=60)
 # Momentum horizons, in months, for factor and probability changes.
 _DELTA_HORIZONS = (1, 3, 6)
 
+# The number of factors belongs to the model, not to this module.  A
+# literal here read 4 after the validated default moved to 5, so the
+# documented way to rebuild the downstream panel produced a
+# configuration nobody had measured — and with five names competing for
+# four factors the assignment quietly dropped `long_rates` altogether.
+_DEFAULT_N_FACTORS = len(Nowcaster.DEFAULT_FACTOR_NAMES)
+
 
 def _safe_delta(series: pd.Series, months: int) -> float:
     """Change over *months*, or NaN when the history is too short."""
@@ -82,7 +89,7 @@ def generate_features_asof(
     pipeline: Any,
     as_of: str | pd.Timestamp,
     *,
-    n_factors: int = 4,
+    n_factors: int = _DEFAULT_N_FACTORS,
     n_regimes: int = 2,
     factor_names: list[str] | None = None,
     regime_labels: list[str] | None = None,
@@ -140,6 +147,27 @@ def generate_features_asof(
 
     # --- Latent factors and their momentum ---
     factors = nowcaster._last_factors
+
+    # A fit that failed must not be written as a row of zeros.
+    #
+    # 25 of the 690 rows in the previous panel had every factor exactly
+    # 0.0, `signal_rsm` exactly 0.5 and `p_stay_recession` exactly 0.0:
+    # the DFM had returned zeros instead of raising, the RSM had then
+    # been fitted on a degenerate input, and the row was written with a
+    # complete set of plausible-looking numbers.  They clustered in 2020
+    # and later — 11 of the last 25 months — so the fabricated rows sat
+    # exactly where a downstream model would weight them most.
+    #
+    # Standardised factors are never all exactly zero on real data, so
+    # this costs nothing and turns a silent fabrication into a skipped
+    # window that `generate_feature_panel` logs.
+    final_factors = factors.iloc[-1].to_numpy(dtype=float)
+    if np.all(np.abs(np.nan_to_num(final_factors)) < 1e-12):
+        raise RuntimeError(
+            f"DFM returned all-zero factors at {as_of.date()}; the fit "
+            f"failed without raising. Refusing to emit a fabricated row."
+        )
+
     for name in factors.columns:
         row[f"factor_{name}"] = float(factors[name].iloc[-1])
         for h in _DELTA_HORIZONS:
@@ -181,9 +209,26 @@ def generate_features_asof(
         P = nowcaster._rsm.get_transition_matrix()
         stay_rec = float(P[0, 0])
         row["p_stay_recession"] = stay_rec
-        # Expected remaining duration of a geometric holding time.
+        # Expected remaining duration of a geometric holding time,
+        # saturated at the length of the sample.
+        #
+        # `1 / (1 - p)` was guarded only against p == 1.0 exactly, which
+        # float64 almost never produces: an estimated p of
+        # 0.9999999999946 cleared the guard and returned 1.9e11 months.
+        # Eight rows of the previous panel exceeded 1e6 and the largest
+        # was 7.5e11 — one feature whose scale would have swamped every
+        # other column under any standardisation a downstream model
+        # applied, while reading as a finite number throughout.
+        #
+        # The cap is substantive, not cosmetic. A holding time longer
+        # than the sample is not identified by the sample: with T monthly
+        # observations, p = 1 - 1/T and p = 1 - 1/(100T) imply the same
+        # data. Saturating at T states the most the estimate can support.
+        max_duration = float(max(len(factors), 1))
         row["expected_recession_duration"] = (
-            1.0 / (1.0 - stay_rec) if stay_rec < 1.0 else float("nan")
+            min(1.0 / (1.0 - stay_rec), max_duration)
+            if stay_rec < 1.0
+            else max_duration
         )
         row["p_enter_recession"] = float(P[-1, 0])
     except Exception:
