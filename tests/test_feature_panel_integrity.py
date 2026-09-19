@@ -30,7 +30,10 @@ import pandas as pd
 import pytest
 
 from src.models.nowcaster import Nowcaster
-from src.models.walk_forward import generate_features_asof
+from src.models.walk_forward import (
+    generate_feature_panel,
+    generate_features_asof,
+)
 
 _IDX = pd.date_range("2000-01-31", periods=60, freq="ME")
 
@@ -176,3 +179,60 @@ def test_default_factor_count_comes_from_the_model():
         f"model defines {len(Nowcaster.DEFAULT_FACTOR_NAMES)} factors; the "
         f"downstream panel would be built at an unvalidated K"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. A run that skips most of its history must not report success
+# ---------------------------------------------------------------------------
+
+
+def _failing_panel(monkeypatch, fail_before: str):
+    """Patch feature generation to fail for every date before *fail_before*."""
+    cutoff = pd.Timestamp(fail_before)
+
+    def _fake(pipeline, as_of, **kwargs):
+        as_of = pd.Timestamp(as_of)
+        if as_of < cutoff:
+            raise RuntimeError("Data pipeline returned an empty panel")
+        return {"p_recession": 0.2, "knowable_at": as_of}
+
+    monkeypatch.setattr(
+        "src.models.walk_forward.generate_features_asof", _fake,
+    )
+
+
+def test_a_long_run_of_failed_windows_raises(monkeypatch):
+    """Skipping 13 years must not be reported as a successful build.
+
+    Pointing the pipeline at 1980 while asking for as-of dates from 1967
+    failed 120 consecutive windows — the 1969-70 and 1973-75 recessions —
+    each a logged warning, and the run still finished and wrote a panel.
+    """
+    _failing_panel(monkeypatch, fail_before="1980-01-01")
+
+    with pytest.raises(RuntimeError, match="windows failed"):
+        generate_feature_panel(
+            object(), start="1967-01-31", end="2000-01-31", step_months=1,
+        )
+
+
+def test_a_few_failed_windows_are_tolerated(monkeypatch):
+    """Isolated failures are normal and must not abort a long run."""
+    _failing_panel(monkeypatch, fail_before="1967-04-30")
+
+    panel = generate_feature_panel(
+        object(), start="1967-01-31", end="2000-01-31", step_months=1,
+    )
+    assert len(panel) > 380
+    assert panel.index.is_monotonic_increasing
+
+
+def test_the_failure_threshold_can_be_relaxed(monkeypatch):
+    """A caller who knows the history is short can opt out."""
+    _failing_panel(monkeypatch, fail_before="1980-01-01")
+
+    panel = generate_feature_panel(
+        object(), start="1967-01-31", end="2000-01-31", step_months=1,
+        max_failure_fraction=1.0,
+    )
+    assert panel.index[0] >= pd.Timestamp("1980-01-01")

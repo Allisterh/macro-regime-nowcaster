@@ -256,6 +256,7 @@ def generate_feature_panel(
     step_months: int = 1,
     cache_path: str | Path | None = None,
     on_error: str = "warn",
+    max_failure_fraction: float = 0.05,
     progress: Callable[[int, int, pd.Timestamp], None] | None = None,
     **feature_kwargs: Any,
 ) -> pd.DataFrame:
@@ -274,6 +275,15 @@ def generate_feature_panel(
         CSV written after every row.  Existing rows are reused.
     on_error : {"warn", "raise"}
         Whether a failed window aborts the run.
+    max_failure_fraction : float
+        Raise at the end if more than this share of windows were skipped.
+        With ``on_error="warn"`` a failing window is a logged warning and
+        nothing else, so a run can drop a large contiguous stretch of
+        history and still finish with a cheerful row count: pointing the
+        pipeline at 1980 while asking for as-of dates from 1967 skipped
+        120 consecutive windows — two recessions — and reported success.
+        A panel missing a sixth of its span is a different object from
+        the one that was asked for, and should say so.
 
     Returns
     -------
@@ -294,6 +304,7 @@ def generate_feature_panel(
 
     rows: dict[pd.Timestamp, dict] = dict(cached)
     total = len(dates)
+    failures: list[pd.Timestamp] = []
 
     for i, as_of in enumerate(dates, start=1):
         if as_of in rows:
@@ -309,6 +320,7 @@ def generate_feature_panel(
             if on_error == "raise":
                 raise
             logger.warning(f"Walk-forward failed at {as_of.date()}: {exc}")
+            failures.append(as_of)
             continue
 
         if cache_file is not None:
@@ -319,6 +331,24 @@ def generate_feature_panel(
 
     if not rows:
         raise RuntimeError("No successful walk-forward windows")
+
+    if failures:
+        share = len(failures) / max(total, 1)
+        logger.warning(
+            f"Walk-forward skipped {len(failures)} of {total} windows "
+            f"({share:.1%}), from {failures[0].date()} to "
+            f"{failures[-1].date()}"
+        )
+        if share > max_failure_fraction:
+            raise RuntimeError(
+                f"{len(failures)} of {total} walk-forward windows failed "
+                f"({share:.1%} > {max_failure_fraction:.1%}), spanning "
+                f"{failures[0].date()} to {failures[-1].date()}. The panel "
+                f"would be missing that history without saying so. Check the "
+                f"first warning above; a long run of failures at the start "
+                f"usually means the pipeline's start_date is later than the "
+                f"first as-of date. Pass max_failure_fraction to accept it."
+            )
 
     panel = pd.DataFrame.from_dict(rows, orient="index").sort_index()
     panel.index.name = "reference_month"
