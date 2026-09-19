@@ -198,7 +198,29 @@ with st.sidebar:
     st.title("⚙️ Controls")
     start_date = st.date_input("Start Date", value=pd.Timestamp("2000-01-01"))
     end_date = st.date_input("End Date", value=pd.Timestamp.today())
-    n_factors = st.slider("Latent Factors", min_value=1, max_value=8, value=4)
+    # Default from the model, not a literal. This slider read value=4
+    # after the validated default moved to 5, so the dashboard was
+    # silently running a configuration nobody had measured — and at 4 it
+    # also truncates DEFAULT_FACTOR_NAMES, dropping long_rates.
+    from src.models.nowcaster import Nowcaster as _NowcasterDefaults
+
+    _default_k = len(_NowcasterDefaults.DEFAULT_FACTOR_NAMES)
+    n_factors = st.slider(
+        "Latent Factors", min_value=1, max_value=8, value=_default_k,
+        help=(
+            f"{_default_k} is the validated default: the smallest number at "
+            f"which every factor has a name the loadings support."
+        ),
+    )
+    if n_factors != _default_k:
+        st.warning(
+            f"Running with {n_factors} factors instead of the validated "
+            f"{_default_k}. Below {_default_k} the factor names are "
+            f"truncated and one of the rates factors is dropped; above it, "
+            f"the extra factors are unnamed. Measured performance in the "
+            f"README does not apply.",
+            icon="⚠️",
+        )
     run_button = st.button("🔄 Run Nowcast", type="primary", use_container_width=True)
 
     st.markdown("---")
