@@ -14,7 +14,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.models.dynamic_factor_model import DynamicFactorModel, _varimax
+from src.models.dynamic_factor_model import (
+    DynamicFactorModel,
+    _params_are_sane,
+    _varimax,
+)
 from src.models.kalman_filter import _robust_inverse
 
 # ---------------------------------------------------------------------------
@@ -28,6 +32,34 @@ def test_varimax_refuses_non_finite_loadings():
     rotated, rotation = _varimax(loadings)
     np.testing.assert_array_equal(rotated, loadings)
     np.testing.assert_allclose(rotation, np.eye(2))
+
+
+def test_params_are_sane_rejects_overflowed_but_finite_values():
+    """Finiteness alone does not detect a diverged EM.
+
+    This is the check the original guard was missing. Overflow climbs to
+    ~1e300 while ``np.isfinite`` stays True, so the "last finite
+    estimate" the guard fell back to was already garbage: R so large the
+    Kalman gain underflowed, the state pinned at its zero
+    initialisation, and 808 months of factors all exactly 0.0.
+    """
+    runaway = np.array([[1e300, 0.0], [0.0, 1e300]])
+    assert np.isfinite(runaway).all(), "precondition: the old guard passed this"
+    assert not _params_are_sane(runaway)
+
+
+def test_params_are_sane_accepts_ordinary_parameters():
+    """Parameters on a standardised panel are O(1) and must not trip it."""
+    A = np.array([[0.85, 0.0], [0.0, 0.79]])
+    C = np.random.default_rng(0).standard_normal((10, 2))
+    Q = np.eye(2) * 0.3
+    R = np.eye(10) * 0.4
+    assert _params_are_sane(A, C, Q, R)
+
+
+def test_params_are_sane_rejects_non_finite():
+    assert not _params_are_sane(np.array([[1.0, np.nan]]))
+    assert not _params_are_sane(np.array([[1.0, np.inf]]))
 
 
 def test_robust_inverse_handles_a_singular_matrix():
@@ -91,3 +123,12 @@ def test_diverging_em_keeps_the_last_finite_parameters():
             f"{name} is non-finite after an extreme shock"
         )
     assert np.isfinite(dfm.get_loadings()).all()
+
+    # Finite is not enough: the fit must also have produced factors that
+    # vary. A diverged EM used to return every factor identically zero,
+    # which is finite, correctly shaped and completely uninformative.
+    sd = dfm.factors_.std().to_numpy()
+    assert float(np.max(sd)) > 1e-12, (
+        f"factors are constant after an extreme shock (sd = {sd}); the fit "
+        f"degenerated but reported success"
+    )
