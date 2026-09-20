@@ -92,6 +92,30 @@ Five interpretable factors extracted via PCA + EM + varimax rotation. Names are 
 
 ![Latent Factors](docs/images/latent_factors.png)
 
+### Forward Volatility Outlook (relative)
+
+The latent factors rank forward NASDAQ volatility consistently — the
+out-of-sample IC is positive in **all 15** fold-horizon combinations measured,
+and both estimators agree on the sign. They predict its *level* weakly: R² is
++0.02 to +0.06, and at every horizon the one negative fold is 2006-2016, which
+contains 2008. The model ranks that period correctly and still misses its
+magnitude, because 2008 volatility lies outside anything in its training range.
+
+The panel is built around that asymmetry. It reports a **percentile** — where
+today sits against the model's own history — with its measured out-of-sample IC
+beside it, and gives magnitude as the *empirical spread* of what volatility
+actually did in comparable months rather than as a point forecast:
+
+> 53rd percentile of this model's own history — middling
+> Out-of-sample IC +0.157 over 5 purged folds, 3-month horizon.
+> In the 142 months when this model predicted around today's level, realised
+> 3-month volatility landed between 12.8% and 21.4% (median 15.7%).
+
+A number in large type would be least reliable exactly when it mattered most,
+so there isn't one. `src/models/volatility_outlook.py` imports the estimator and
+the CV splitter from the benchmark rather than redefining them, so what the
+dashboard serves is what was measured.
+
 ### Historical Regime Classification
 
 Continuous regime probability mapped against NBER recession dates:
@@ -662,7 +686,8 @@ machine. The single-column and factor-only sets are the only ones worth running.
 - **Volatility ranking: modestly supported.** `factor_*` columns, positive IC in
   every fold over 1967–2026, at every horizon tested, and under both estimators.
   Use them to rank periods by expected volatility, not to forecast its level,
-  and size the expectation to an IC near +0.16.
+  and size the expectation to an IC near +0.16. The dashboard's **Forward
+  Volatility Outlook** panel shows exactly this, as a percentile.
 - **Drawdown: no**, despite a +0.20 IC on `p_recession` — the R² is negative, so
   the ordering carries some information the magnitude does not support.
 - **Regime state as a conditioner or interaction term** remains the most

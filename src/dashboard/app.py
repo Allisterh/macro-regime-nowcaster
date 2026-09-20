@@ -77,6 +77,15 @@ WALK_FORWARD_PATH = Path("data/features.csv")
 _COARSE_SAMPLING_DAYS = 45
 
 
+def _ordinal(n: int) -> str:
+    """``53`` to ``53rd``. 11-13 take 'th' regardless of last digit."""
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def _rgba(hex_colour: str, alpha: float) -> str:
     """``#rrggbb`` to an ``rgba()`` string, for translucent CI bands."""
     h = hex_colour.lstrip("#")
@@ -118,6 +127,41 @@ def compute_horizon_curve():
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Could not compute the horizon curve: {exc}")
         return None
+
+
+@st.cache_resource(show_spinner="Fitting volatility outlook…")
+def load_volatility_outlook(horizon: int = 3):
+    """Fit the relative forward-volatility model, or explain why not.
+
+    Returns ``(outlook, message)``; exactly one is ever non-None. The
+    message is shown to the reader instead of a chart, because a panel
+    that silently renders nothing is indistinguishable from one that is
+    reporting calm.
+    """
+    if not WALK_FORWARD_PATH.exists():
+        return None, (
+            "Needs the walk-forward panel. Run "
+            "`python scripts/build_features.py --start 1967-01-31 --step 1`."
+        )
+    try:
+        import os
+
+        from src.data.fred_client import FREDClient
+        from src.models.volatility_outlook import fit_volatility_outlook
+
+        api_key = os.environ.get("FRED_API_KEY", "")
+        if not api_key:
+            return None, "FRED_API_KEY is not set, so prices cannot be fetched."
+        client = FREDClient(api_key=api_key, cache_dir="data/cache")
+        prices = pd.to_numeric(
+            client.get_series("NASDAQCOM"), errors="coerce"
+        ).dropna()
+        return fit_volatility_outlook(
+            prices, WALK_FORWARD_PATH, horizon=horizon
+        ), None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not fit the volatility outlook: {exc}")
+        return None, f"Could not fit the volatility outlook: {exc}"
 
 
 @st.cache_data(show_spinner=False)
@@ -854,6 +898,104 @@ else:
             "overlap almost everywhere, so the orderings are suggestive "
             "rather than established."
         )
+
+    st.markdown("---")
+
+    # ==================================================================
+    # 6c. Relative forward-volatility outlook
+    # ==================================================================
+    # Deliberately a percentile, not a forecast. The factors rank future
+    # volatility consistently (IC positive in all 15 fold-horizon
+    # combinations measured) but predict its *level* weakly, and the one
+    # fold that is negative at every horizon is 2006-2016 — the model
+    # ranks 2008 correctly and still misses its magnitude. A number in
+    # large type here would be least reliable exactly when it mattered.
+    st.subheader("Forward Volatility Outlook (relative)")
+
+    outlook, vol_message = load_volatility_outlook(horizon=3)
+    if outlook is None:
+        st.caption(vol_message)
+    else:
+        try:
+            live_factors = factors.rename(
+                columns={c: f"factor_{c}" for c in factors.columns}
+            )
+            assessment = outlook.assess(live_factors.dropna().iloc[-1])
+        except (KeyError, ValueError, IndexError) as exc:
+            assessment = None
+            st.caption(f"Current factors are not usable for the outlook: {exc}")
+
+        if assessment is not None:
+            pct = assessment["percentile"]
+            band = (
+                "elevated" if pct >= 70 else
+                "subdued" if pct <= 30 else
+                "middling"
+            )
+            colour = (
+                "#e74c3c" if pct >= 70 else
+                "#27ae60" if pct <= 30 else
+                "#f39c12"
+            )
+
+            vcol1, vcol2 = st.columns([1, 2])
+            with vcol1:
+                st.markdown(
+                    f"<div style='font-size:2.6rem;font-weight:700;"
+                    f"color:{colour};line-height:1.1'>{_ordinal(round(pct))}</div>"
+                    f"<div style='color:#7f8c8d'>percentile of this model's "
+                    f"own history — <b>{band}</b></div>",
+                    unsafe_allow_html=True,
+                )
+                ic_text = (
+                    f"{outlook.oos_ic:+.3f}" if outlook.oos_ic is not None
+                    else "not measurable"
+                )
+                st.caption(
+                    f"Out-of-sample IC {ic_text} over {outlook.oos_folds} "
+                    f"purged folds, {outlook.horizon}-month horizon."
+                )
+
+            with vcol2:
+                hist = outlook.history.dropna()
+                fig_v = go.Figure()
+                fig_v.add_trace(go.Histogram(
+                    x=hist.values, nbinsx=48,
+                    marker=dict(color="#bdc3c7"), name="history",
+                    hovertemplate="predicted %{x:.1%}<extra></extra>",
+                ))
+                fig_v.add_vline(
+                    x=assessment["prediction"], line=dict(color=colour, width=3),
+                )
+                fig_v.update_layout(
+                    height=200, margin=dict(t=10, b=30, l=10, r=10),
+                    showlegend=False,
+                    xaxis=dict(title="model-predicted forward volatility",
+                               tickformat=".0%"),
+                    yaxis=dict(title="months"),
+                    plot_bgcolor="white",
+                )
+                st.plotly_chart(fig_v, use_container_width=True)
+
+            n_comp = assessment["n_comparable"]
+            if n_comp:
+                st.caption(
+                    f"**What that meant historically.** In the {n_comp} months "
+                    f"when this model predicted around today's level, realised "
+                    f"{outlook.horizon}-month volatility landed between "
+                    f"{assessment['realised_p25']:.1%} and "
+                    f"{assessment['realised_p75']:.1%} (median "
+                    f"{assessment['realised_median']:.1%}). That spread is the "
+                    f"honest magnitude — the model ranks periods far better "
+                    f"than it sizes them, so it is shown as a range of "
+                    f"outcomes rather than a forecast."
+                )
+            st.caption(
+                ":grey[Ranking only. Out-of-sample R² is +0.02 to +0.06 across "
+                "3/6/12-month horizons, and the one fold negative at every "
+                "horizon spans 2008 — the level is least reliable in a crisis, "
+                "which is when it would matter most. Do not trade the number.]"
+            )
 
     st.markdown("---")
 
