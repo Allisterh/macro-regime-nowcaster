@@ -59,6 +59,72 @@ def _fill_for_pca(arr: np.ndarray) -> np.ndarray:
 _MAX_SANE_PARAM = 1e6
 
 
+# Floor on idiosyncratic variance, as a share of unit variance — the
+# panel is standardised, so every series enters with variance ~1.
+#
+# A series the factors can fit exactly drives its R_ii to zero, the
+# Kalman gain to infinity, and the next M-step into nonsense: with no
+# floor, min(R) fell through 3e-4 and C then exploded to 1e35.
+#
+# This panel makes that inevitable rather than unlucky. It carries
+# TERM_SPREAD = GS10 - TB3MS and CREDIT_SPREAD = BAA - AAA *alongside*
+# all four components, so those two series are exact linear combinations
+# of others and a factor model can drive their residual to zero. The
+# derived series were added deliberately, to reach back past 1982 and
+# recover two more recessions, so the fix belongs here rather than in
+# the panel.
+#
+# 1% still allows a series to be 99% common, which is more than any real
+# macro series manages.
+_MIN_IDIOSYNCRATIC_VAR = 1e-2
+
+
+def _identify_state(
+    A: np.ndarray, C: np.ndarray, Q: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Pin the state's scale and rotation by orthonormalising C.
+
+    A dynamic factor model is identified only up to an invertible
+    transform of the state: for any non-singular M, ``f -> M f`` with
+    ``C -> C M^-1`` leaves the likelihood unchanged. That is K^2 free
+    directions, and the EM will wander along them.
+
+    Traced on the 832-month panel, it did exactly that. Q climbed
+    1.2 -> 64 -> 2.0e3 -> 1.4e6 while max|A| went 0.94 -> 51 with its
+    eigenvalues pinned near 0.99 and C flat at 0.42 — the hallmark of a
+    drift along a non-orthogonal similarity transform rather than an
+    outlier or a step-size problem. The divergence guard then kept an
+    under-converged fit in which two of five factors carried no
+    loadings.
+
+    Writing ``C = U S V'`` and taking ``M = S V'`` gives ``C M^-1 = U``,
+    so the loadings have orthonormal columns and the state can no longer
+    absorb scale. Only an orthogonal rotation is left free, which is
+    bounded and is what varimax resolves afterwards. The transform is
+    exact, so this selects a member of the equivalence class rather than
+    changing the model.
+    """
+    try:
+        U, S, Vt = np.linalg.svd(C, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return A, C, Q
+    if not (np.isfinite(U).all() and np.isfinite(S).all()):
+        return A, C, Q
+    # A factor with no loadings left makes M singular; leave the fit
+    # alone and let the null-factor check report it.
+    if S.min() <= 1e-10 * max(S.max(), 1e-30):
+        return A, C, Q
+
+    M = np.diag(S) @ Vt
+    M_inv = Vt.T @ np.diag(1.0 / S)
+    A_new = M @ A @ M_inv
+    Q_new = M @ Q @ M.T
+    C_new = C @ M_inv
+    if not all(np.isfinite(m).all() for m in (A_new, C_new, Q_new)):
+        return A, C, Q
+    return A_new, C_new, 0.5 * (Q_new + Q_new.T)
+
+
 def _params_are_sane(*matrices: np.ndarray) -> bool:
     """True when every parameter is finite and on a plausible scale."""
     return all(
@@ -218,6 +284,7 @@ class DynamicFactorModel:
         # well below that, the name is not evidenced and downstream
         # code should not select the factor by it.
         self._factor_match_quality: dict[str, float] = {}
+        self._factor_strength: dict[str, float] = {}
         self._A: np.ndarray | None = None
         self._Q: np.ndarray | None = None
         self._R: np.ndarray | None = None
@@ -363,12 +430,26 @@ class DynamicFactorModel:
                     sum_xpxp += np.outer(X_smooth[t - 1], X_smooth[t - 1]) + P_smooth[t - 1]
                 A = sum_xpxt @ np.linalg.solve(sum_xpxp, np.eye(K))
 
-            # Update Q
-            sum_xxp = np.zeros((K, K))
+            # Update Q — the true M-step, which the previous form was not.
+            #
+            # It accumulated (x_t - A x_{t-1})(.)' + P_t - A P_{t,t-1}',
+            # which expands to S11 - A S10' - S10 A' + A S00 A' plus only
+            # one of the two covariance corrections: the A P_{t-1} A'
+            # term was missing. That makes the update something other
+            # than the maximiser of the expected complete-data
+            # likelihood, so the EM is no longer guaranteed to increase
+            # the likelihood at every step — and on the 832-month panel
+            # it did not. Q climbed 1.1 -> 62 -> 4.2e4 -> 1.1e6 over 32
+            # iterations while R collapsed, and the divergence guard then
+            # kept an under-converged fit in which two of five factors
+            # carried no loadings at all.
+            #
+            # With A = S10 S00^-1 the maximiser collapses to
+            # (S11 - A S10') / (T-1), which is also PSD by construction.
+            sum_xx = np.zeros((K, K))
             for t in range(1, T):
-                diff = X_smooth[t] - A @ X_smooth[t - 1]
-                sum_xxp += np.outer(diff, diff) + P_smooth[t] - A @ smooth.smoothed_cross_covs[t - 1, :K, :K].T
-            Q = sum_xxp / max(T - 1, 1)
+                sum_xx += np.outer(X_smooth[t], X_smooth[t]) + P_smooth[t]
+            Q = (sum_xx - A @ sum_xpxt.T) / max(T - 1, 1)
             Q = 0.5 * (Q + Q.T)
 
             # Update R — diagonal only.  For quarterly series with the
@@ -389,7 +470,11 @@ class DynamicFactorModel:
                         diag_R[i] += resid[i] ** 2 + P_proj[i, i]
                         counts[i] += 1
             counts[counts == 0] = 1.0
-            R = np.diag(diag_R / counts)
+            R = np.diag(np.maximum(diag_R / counts, _MIN_IDIOSYNCRATIC_VAR))
+
+            # Remove the K^2 unidentified directions before testing
+            # for divergence, so the EM cannot drift along them.
+            A, C, Q = _identify_state(A, C, Q)
 
             # Stop on divergence rather than propagating NaN downstream.
             if not _params_are_sane(A, C, Q, R):
@@ -519,6 +604,47 @@ class DynamicFactorModel:
             else self.smoothed_factors_
         )
 
+        # How much of the panel each factor actually accounts for.
+        #
+        # This cannot be read off the loadings any more. `_identify_state`
+        # gives C orthonormal columns, so every column has unit norm by
+        # construction and a "small loadings" test can never fire — the
+        # scale now lives in the factors. A factor's contribution is
+        # Var(f_j) * ||C_j||^2, which with orthonormal C is just its own
+        # variance.
+        #
+        # The check still matters: at K above what the panel supports,
+        # the EM returns factors that explain nothing, and the regime
+        # model was previously fitted on one of them by name.
+        # Read the scale from `_factor_std`, captured before the factors
+        # were normalised for display. `factors_` itself is divided by
+        # that std, so its variance is identically 1 and a contribution
+        # computed from it comes out equal for every factor — which is
+        # what a first version of this measured, reporting 25/25/25/25
+        # on a panel whose PCA spectrum is 20/10/8/5.
+        factor_scale = np.asarray(self._factor_std, dtype=float)
+        col_norm_sq = (np.asarray(self._loadings, dtype=float) ** 2).sum(axis=0)
+        contribution = (factor_scale ** 2) * col_norm_sq
+        largest = float(np.max(contribution)) or 1.0
+
+        final_names = (
+            list(self.factors_.columns)
+            if isinstance(self.factors_, pd.DataFrame)
+            else [f"factor_{i}" for i in range(K)]
+        )
+        self._factor_strength = {}
+        for j, name in enumerate(final_names):
+            share = float(contribution[j]) / largest
+            self._factor_strength[name] = share
+            if share < self.NULL_FACTOR_STRENGTH:
+                logger.warning(
+                    f"DFM: factor '{name}' is empty — it accounts for "
+                    f"{share:.2%} of what the largest factor does, so its "
+                    f"path is prior-driven noise rather than a measured "
+                    f"factor. K is probably higher than this panel "
+                    f"supports."
+                )
+
         # A degenerate fit must fail here, not downstream.
         #
         # When the EM diverges badly enough the Kalman gain underflows and
@@ -613,18 +739,35 @@ class DynamicFactorModel:
     #
     # TEDRATE is retained here for pre-2022 samples but is discontinued;
     # BAMLH0A0HYM2 is the live credit-stress anchor.
+    # A factor whose largest loading is below this share of the panel's
+    # largest is not a factor: nothing loads on it, and its path is the
+    # AR prior rather than the data. 1% is far below any real factor
+    # seen here (the weakest genuine one is ~21%) and far above the
+    # empty ones (~0.2%).
+    NULL_FACTOR_STRENGTH: float = 0.01
+
     _SIGN_ANCHORS: dict[str, list[str]] = {
         "real_activity": ["INDPRO", "IPMAN", "TCU", "CFNAI", "CMRMTSPL"],
         "labor_market": [
             "PAYEMS", "JTSJOL", "CES0500000003", "TEMPHELPS", "AWHAETP",
         ],
-        "inflation": ["CPIAUCSL", "CPILFESL", "PCEPI", "PCEPILFE", "PPIFIS"],
+        # Not an inflation factor: there is none in this panel. The
+        # price series load 0.117 on their best home against 0.059-0.066
+        # elsewhere, and the factor they land on is defined by
+        # corporate-over-Treasury spreads. Inflation itself lives in
+        # `long_rates`, which correlates +0.605 with CPI year-on-year
+        # against +0.371 for this one — nominal yields embed it, as
+        # theory says they should. Naming this "inflation" scored 0.51
+        # and invited the label to be believed.
+        "credit_premium": ["AAA10Y", "BAA10Y"],
         "financial_stress": ["NFCI", "ANFCI", "STLFSI2", "VIXCLS", "TEDRATE"],
         # The panel contains two distinct rates factors that earlier
         # configurations had no name for, so they were silently absorbed
         # by whichever label the assignment had left over — which is how
         # "labor_market" came to be a yield-curve factor.
-        "yield_curve": ["TERM_SPREAD", "T10Y3M", "T10Y2Y", "DFF", "TB3MS"],
+        # Slope only. DFF and TB3MS are rate *levels* and pulled this
+        # toward `long_rates`; dropping them took quality 1.72 -> 2.20.
+        "yield_curve": ["TERM_SPREAD", "T10Y3M", "T10Y2Y"],
         "long_rates": ["GS10", "AAA", "T10YIE", "T5YIE"],
     }
 
@@ -692,6 +835,7 @@ class DynamicFactorModel:
         # and GS10, i.e. bond yields, and the Markov-switching model was
         # fitted on it as though it were labour-market data.
         self._factor_match_quality = {}
+        self._factor_strength = {}
         for k, j in enumerate(assigned):
             idx = anchor_idx_by_name.get(j, [])
             if not idx:
@@ -708,6 +852,12 @@ class DynamicFactorModel:
             anchor_strength = float(np.mean(np.abs(loadings[idx, k])))
             leading = float(np.quantile(np.abs(loadings[:, k]), 0.9)) or 1.0
             ratio = anchor_strength / leading
+            # Quality is a ratio and says nothing about whether the
+            # factor exists; `_factor_strength` above answers that.
+            # On the full 1956-2026 panel "real_activity" scored 1.13
+            # here with a maximum loading of 0.0008, because its
+            # anchors were the largest of its negligible loadings —
+            # all a scale-free ratio can ever tell you.
             self._factor_match_quality[names[j]] = ratio
             if ratio < 1.0:
                 strongest = int(np.argmax(np.abs(loadings[:, k])))

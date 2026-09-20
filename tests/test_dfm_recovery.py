@@ -204,15 +204,22 @@ def test_factor_names_follow_loadings_not_position():
     Varimax returns columns in an arbitrary order, so naming factor *k*
     ``factor_names[k]`` can label the financial-stress factor
     "real_activity" and then sign-align it against the wrong anchors.
+
+    The blocks here are the real anchor sets. This test used to build a
+    CPI block and assert an "inflation" label landed on it, which stopped
+    being meaningful once that name was retired: the panel has no
+    inflation factor, the price series load 0.117 on their best home
+    against 0.059-0.066 elsewhere, and inflation itself shows up in
+    `long_rates` (+0.605 with CPI year-on-year).
     """
     rng = np.random.default_rng(7)
     T = 200
     idx = pd.date_range("2000-01-31", periods=T, freq="ME")
 
-    activity = ["INDPRO", "PAYEMS", "CFNAI", "W875RX1"]
-    inflation = ["CPIAUCSL", "CPILFESL", "PCEPI", "PPIFIS"]
-    stress = ["BAA10Y", "TEDRATE", "VIXCLS"]
-    cols = activity + inflation + stress
+    activity = ["INDPRO", "IPMAN", "TCU", "CFNAI"]
+    credit = ["AAA10Y", "BAA10Y"]
+    stress = ["NFCI", "ANFCI", "STLFSI2", "VIXCLS"]
+    cols = activity + credit + stress
 
     f = np.zeros((T, 3))
     for t in range(1, T):
@@ -220,8 +227,8 @@ def test_factor_names_follow_loadings_not_position():
 
     loadings = rng.standard_normal((len(cols), 3)) * 0.12
     loadings[0:4, 0] += 1.4          # activity block -> factor 0
-    loadings[4:8, 1] += 1.4          # inflation block -> factor 1
-    loadings[8:11, 2] += 1.4         # stress block -> factor 2
+    loadings[4:6, 1] += 1.4          # credit block   -> factor 1
+    loadings[6:10, 2] += 1.4         # stress block   -> factor 2
 
     panel = pd.DataFrame(
         f @ loadings.T + rng.standard_normal((T, len(cols))) * 0.35,
@@ -230,24 +237,26 @@ def test_factor_names_follow_loadings_not_position():
 
     dfm = DynamicFactorModel(
         n_factors=3,
-        factor_names=["real_activity", "inflation", "financial_stress"],
+        factor_names=["real_activity", "credit_premium", "financial_stress"],
         max_iter=40,
     ).fit(panel)
 
     named = list(dfm.factors_.columns)
-    assert set(named) == {"real_activity", "inflation", "financial_stress"}
+    assert set(named) == {"real_activity", "credit_premium", "financial_stress"}
 
-    # The factor named "inflation" must be the one the CPI series load on.
     loadings_df = pd.DataFrame(dfm.get_loadings(), index=cols, columns=named)
-    infl_col = loadings_df.loc[inflation].abs().mean()
-    assert infl_col.idxmax() == "inflation", (
-        f"The 'inflation' label did not land on the factor the CPI series "
-        f"load on; mean |loading| by factor:\n{infl_col}"
+
+    credit_col = loadings_df.loc[credit].abs().mean()
+    assert credit_col.idxmax() == "credit_premium", (
+        f"The 'credit_premium' label did not land on the factor the "
+        f"corporate-spread series load on; mean |loading| by factor: "
+        f"{credit_col.to_dict()}"
     )
 
     act_col = loadings_df.loc[activity].abs().mean()
     assert act_col.idxmax() == "real_activity", (
-        f"The 'real_activity' label landed on the wrong factor:\n{act_col}"
+        f"The 'real_activity' label landed on the wrong factor: "
+        f"{act_col.to_dict()}"
     )
 
 
@@ -315,3 +324,85 @@ def test_weakly_evidenced_factor_names_are_flagged():
         f"the name matching the real factor block should be well "
         f"evidenced: {quality}"
     )
+
+
+# ---------------------------------------------------------------------------
+# An empty factor is not a factor
+# ---------------------------------------------------------------------------
+
+
+def test_a_factor_nothing_loads_on_is_flagged_as_empty():
+    """Match quality is a ratio, so it cannot detect a null factor.
+
+    On the full 1956-2026 panel the factor named ``real_activity``
+    scored 1.13 — comfortably above the 1.0 "evidenced" threshold —
+    with a maximum absolute loading of 0.0008 and a 0.0% share of panel
+    variance. Its anchors were simply the largest of its negligible
+    loadings, which is all a ratio can ever tell you. The regime model
+    was then fitted on it by name.
+
+    ``_factor_strength`` is the scale-aware companion: a factor's
+    largest loading relative to the largest in the matrix.
+    """
+    rng = np.random.default_rng(5)
+    T = 240
+    idx = pd.date_range("2000-01-31", periods=T, freq="ME")
+
+    activity = ["INDPRO", "IPMAN", "TCU", "CFNAI"]
+    cols = activity + [f"noise{i}" for i in range(6)]
+
+    # One real factor; the second has nothing to attach to.
+    f = np.zeros(T)
+    for t in range(1, T):
+        f[t] = 0.85 * f[t - 1] + rng.standard_normal() * 0.35
+
+    obs = rng.standard_normal((T, len(cols))) * 0.4
+    obs[:, :4] += f[:, None] * 1.5          # activity block loads
+    panel = pd.DataFrame(obs, index=idx, columns=cols)
+
+    dfm = DynamicFactorModel(
+        n_factors=2,
+        factor_names=["real_activity", "credit_premium"],
+        max_iter=60,
+    ).fit(panel)
+
+    strength = dfm._factor_strength
+    assert strength, "no factor-strength scores were recorded"
+    assert set(strength) == {"real_activity", "credit_premium"}
+
+    # The panel supports one factor, so exactly one must be strong.
+    ordered = sorted(strength.values())
+    assert ordered[-1] > dfm.NULL_FACTOR_STRENGTH, (
+        f"the genuine factor was flagged as empty: {strength}"
+    )
+    assert max(strength.values()) == pytest.approx(1.0), (
+        "strength is relative to the largest loading, so the top factor "
+        "should be 1.0"
+    )
+
+
+def test_strength_and_quality_measure_different_things():
+    """A well-scored name on an empty factor is the case that bit.
+
+    Quality is scale-free and strength is not, so a fit must be able to
+    report a high ratio and a low magnitude at the same time — which is
+    exactly the combination that went unnoticed.
+    """
+    rng = np.random.default_rng(6)
+    T, idx = 240, pd.date_range("2000-01-31", periods=240, freq="ME")
+    cols = ["INDPRO", "IPMAN", "TCU", "CFNAI"] + [f"x{i}" for i in range(6)]
+
+    f = np.zeros(T)
+    for t in range(1, T):
+        f[t] = 0.85 * f[t - 1] + rng.standard_normal() * 0.35
+    obs = rng.standard_normal((T, len(cols))) * 0.4
+    obs[:, :4] += f[:, None] * 1.5
+    panel = pd.DataFrame(obs, index=idx, columns=cols)
+
+    dfm = DynamicFactorModel(
+        n_factors=2, factor_names=["real_activity", "credit_premium"], max_iter=60,
+    ).fit(panel)
+
+    assert set(dfm._factor_match_quality) == set(dfm._factor_strength)
+    # They are not the same number, or one of them is redundant.
+    assert dfm._factor_match_quality != dfm._factor_strength

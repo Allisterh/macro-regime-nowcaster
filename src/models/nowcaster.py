@@ -262,7 +262,7 @@ class Nowcaster:
     # them labour. Naming the two rates factors explicitly is what stops
     # a leftover label absorbing them.
     DEFAULT_FACTOR_NAMES = [
-        "real_activity", "inflation", "financial_stress",
+        "real_activity", "credit_premium", "financial_stress",
         "yield_curve", "long_rates",
     ]
 
@@ -686,7 +686,39 @@ class Nowcaster:
         # interest rates.  That is what produced a 99.9% reading while
         # every other signal was calm.
         quality = getattr(self._dfm, "_factor_match_quality", {}) or {}
+        strength = getattr(self._dfm, "_factor_strength", {}) or {}
         available = [c for c in self.rsm_factors if c in factors.columns]
+
+        # Drop factors nothing loads on, before considering their names.
+        #
+        # Match quality is a ratio, so it cannot see an empty factor: on
+        # the full 1956-2026 panel "real_activity" scored 1.13 with a
+        # maximum loading of 0.0008 and a 0.0% share of panel variance,
+        # and the regime model was fitted on that noise.
+        null_threshold = getattr(
+            self._dfm, "NULL_FACTOR_STRENGTH", 0.01
+        )
+        empty = [
+            c for c in available
+            if np.isfinite(strength.get(c, np.nan))
+            and strength[c] < null_threshold
+        ]
+        if empty and len(empty) < len(available):
+            logger.warning(
+                f"RSM: excluding {empty} — nothing loads on "
+                f"{'them' if len(empty) > 1 else 'it'} "
+                f"({ {c: f'{strength[c]:.2%}' for c in empty} } of the "
+                f"panel's largest loading), so the path is prior-driven "
+                f"noise rather than a measured factor."
+            )
+            available = [c for c in available if c not in empty]
+        elif empty:
+            logger.error(
+                f"RSM: every requested factor is empty ({empty}). The DFM "
+                f"fit is degenerate — check for an EM divergence warning. "
+                f"Fitting anyway, but the regime probability is not "
+                f"informative."
+            )
         if quality:
             evidenced = [
                 c for c in available
