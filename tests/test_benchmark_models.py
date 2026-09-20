@@ -98,12 +98,53 @@ def test_ridge_penalty_is_selected_not_fixed(sample):
     X, y = sample
     fitted = build_models()["ridge"]().fit(X, y)
 
-    ridge_step = fitted.steps[-1][1]
-    assert hasattr(ridge_step, "alpha_"), (
+    selected = getattr(fitted, "best_params_", None) or getattr(
+        fitted, "alpha_", None
+    )
+    assert selected is not None, (
         "the benchmark's ridge does not select its penalty; a fixed alpha "
         "makes the feature-set comparison depend on that constant"
     )
-    assert np.isfinite(ridge_step.alpha_)
+
+
+def test_penalty_search_is_purged_not_leave_one_out(sample):
+    """The inner search must respect the same label overlap as the outer.
+
+    ``RidgeCV``'s leave-one-out GCV is wrong for an overlapping forward
+    target: the held-out point's label is computed from prices it shares
+    with its immediate neighbours, and those neighbours stay in the
+    training set. The held-out error is therefore optimistic and the
+    search is pulled toward too small a penalty — under-regularising the
+    exact comparison this script exists to make.
+    """
+    X, y = sample
+    fitted = build_models(label_horizon=3, embargo=3)["ridge"]()
+
+    inner = getattr(fitted, "cv", None)
+    found = type(inner).__name__ if inner is not None else "a default (LOO) splitter"
+    assert isinstance(inner, PurgedWalkForward), (
+        f"the penalty search uses {found}; with overlapping forward "
+        f"windows it must purge and embargo like the outer loop"
+    )
+    assert inner.label_horizon == 3, (
+        "the inner splitter's label horizon does not match the target's, "
+        "so it purges the wrong samples"
+    )
+    assert inner.embargo == 3
+
+
+def test_purged_splitter_accepts_the_sklearn_signature(sample):
+    """It has to be usable as a `cv=` argument for the above to hold."""
+    X, y = sample
+    cv = PurgedWalkForward(n_splits=3, label_horizon=3, embargo=3, min_train=30)
+
+    folds = list(cv.split(X, y))
+    assert folds, "no folds yielded"
+    assert cv.get_n_splits(X) == len(folds)
+    # Splits must depend on position only, never on the target.
+    assert [
+        (a.tolist(), b.tolist()) for a, b in cv.split(X, y * 100.0)
+    ] == [(a.tolist(), b.tolist()) for a, b in folds]
 
 
 @pytest.mark.parametrize("factor", [1e-4, 1e4])

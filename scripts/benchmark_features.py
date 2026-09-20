@@ -123,41 +123,69 @@ def evaluate(X: pd.DataFrame, y: pd.Series, model_fn, cv) -> tuple[float, float,
 
 
 
-def build_models() -> dict:
+def build_models(label_horizon: int = 3, embargo: int = 3) -> dict:
     """The estimators the benchmark compares, as name -> factory.
 
-    Module level rather than inside main() so the scale-invariance
-    property can be asserted in a test.
+    Module level rather than inside main() so the scale-invariance and
+    penalty-selection properties can be asserted in a test.
+
+    Parameters
+    ----------
+    label_horizon, embargo : int
+        Passed to the *inner* splitter so hyper-parameter selection
+        respects the same label overlap as the outer evaluation.
     """
     from sklearn.ensemble import GradientBoostingRegressor
-    from sklearn.linear_model import RidgeCV
-    from sklearn.pipeline import make_pipeline
+    from sklearn.linear_model import Ridge
+    from sklearn.model_selection import GridSearchCV
+    from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
 
-    # Ridge is scaled and has its penalty chosen, not fixed.
+    # Ridge is scaled, and its penalty is chosen by a purged inner loop.
     #
-    # This was `Ridge(alpha=1.0)` on raw columns. The L2 penalty is not
-    # scale-invariant, so with features spanning probabilities (sd ~ 0.1)
-    # and `expected_recession_duration` (sd ~ 3e10, a 7.7e11x ratio) the
-    # effective regularisation was set by units rather than by the data.
-    # Measured on the old panel, standardising alone moved the full-panel
-    # R² from -0.299 to -3.355 on returns: the unstandardised fit had been
-    # accidentally shrinking the wide columns to nothing, which is
-    # regularisation by accident, and not reproducible under a change of
-    # units. The verdict did not change — every R² is negative either way
-    # — but the numbers were an artifact of scale.
+    # Two things were wrong before. It was `Ridge(alpha=1.0)` on raw
+    # columns: an L2 penalty is not scale-invariant — a coefficient
+    # scales as 1/sd, so the penalty bites hardest on the *narrowest*
+    # columns — and the panel mixes probabilities (sd ~ 0.1) with
+    # `expected_recession_duration` (sd ~ 3e10). How hard each feature
+    # was shrunk was decided by the units it happened to be recorded in.
+    # Standardising alone moved the full-panel R² on returns from -0.299
+    # to -3.355.
     #
-    # StandardScaler and RidgeCV both sit inside the pipeline, so they are
-    # refitted on each training fold and never see the test fold. Alpha is
-    # chosen by RidgeCV's leave-one-out GCV on the training fold only;
-    # with overlapping forward windows that can favour a slightly small
-    # alpha, which is a conservative direction here (it can only make the
-    # features look worse, never better).
+    # Then alpha was selected by RidgeCV's leave-one-out GCV. LOO is
+    # wrong for this target: with overlapping forward windows the
+    # held-out point's label is computed from prices it shares with its
+    # immediate neighbours, which stay in the training set, so the
+    # held-out error is optimistic and the search is pulled toward too
+    # small a penalty — under-regularisation, on the one comparison this
+    # script exists to make.
+    #
+    # The inner search therefore uses the same purged, embargoed,
+    # expanding splitter as the outer loop, with the same label horizon.
+    # Everything sits inside the Pipeline, so the scaler and the search
+    # are refitted per outer training fold and neither sees the test
+    # fold.
     alphas = np.logspace(-2, 4, 13)
+
+    def ridge():
+        inner = PurgedWalkForward(
+            n_splits=3,
+            label_horizon=label_horizon,
+            embargo=embargo,
+            # Inner folds are carved out of one outer training fold, so
+            # this has to be well below the outer min_train or the early
+            # folds yield no inner splits at all.
+            min_train=30,
+        )
+        return GridSearchCV(
+            Pipeline([("scale", StandardScaler()), ("ridge", Ridge())]),
+            {"ridge__alpha": alphas},
+            cv=inner,
+            scoring="neg_mean_squared_error",
+        )
+
     return {
-        "ridge": lambda: make_pipeline(
-            StandardScaler(), RidgeCV(alphas=alphas)
-        ),
+        "ridge": ridge,
         # Trees split on order, not magnitude, so the GBM was never
         # affected by the scaling problem and is left as it was.
         "gbm": lambda: GradientBoostingRegressor(
@@ -208,7 +236,7 @@ def main() -> int:
         "factors only": [c for c in X.columns if c.startswith("factor_")],
         "full regime panel": list(X.columns),
     }
-    models = build_models()
+    models = build_models(label_horizon=args.horizon, embargo=args.embargo)
 
     cv = PurgedWalkForward(
         n_splits=args.splits, label_horizon=args.horizon,

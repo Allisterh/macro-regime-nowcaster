@@ -44,7 +44,7 @@ and [Is It Useful Downstream?](#is-it-useful-downstream)
 | Calibration vs CFNAI | **32% better, P = 0.99** (CI excludes zero) |
 | Forecasting 12 months out | AUC 0.677 — modest, but ahead of CFNAI's 0.634 |
 | Predicting forward equity returns | **no skill** (negative R² everywhere) |
-| Predicting forward volatility | **modest rank skill** from the factors — IC +0.18, positive in 5/5 folds; R² only +0.05 |
+| Predicting forward volatility | **modest rank skill** from the factors — IC +0.16, positive in 15/15 fold-horizons; R² only +0.02 to +0.06 |
 | Predicting forward drawdown | **no skill** (negative R² everywhere) |
 | COVID, in real time | **missed** — two months is below the data's resolution |
 
@@ -589,9 +589,12 @@ Three rules make it honest: features join on **`knowable_at`**, not the
 reference month; folds are **purged and embargoed** — on a target built from
 overlapping forward windows, shuffled k-fold reports ~+0.69 correlation where
 the truth is zero (`tests/test_purged_cv.py` asserts exactly this); and the
-ridge is **standardised with its penalty selected inside each training fold**,
-because an L2 penalty on raw columns is decided by the units each feature
-happens to be recorded in rather than by the data.
+ridge is **standardised, with its penalty selected by a purged inner loop**
+inside each training fold — an L2 penalty on raw columns is decided by the units
+each feature happens to be recorded in rather than by the data, and a
+leave-one-out inner search on an overlapping forward target under-regularises,
+because the held-out point shares price history with neighbours that stay in the
+training set.
 
 4–5 folds, 712 monthly observations (1967–2026), 3-month horizon. IC is the
 mean fold correlation; R² is measured against the *training* mean — the naive
@@ -600,10 +603,10 @@ forecast actually available at prediction time.
 | Feature set | return IC | return R² | vol IC | vol R² | drawdown IC | drawdown R² |
 |---|---|---|---|---|---|---|
 | CFNAI only | +0.00 | −0.01 | −0.21 | −0.04 | −0.15 | −0.01 |
-| p_recession only | −0.11 | −0.00 | −0.10 | −0.04 | +0.20 | −0.00 |
-| regime signals (4) | −0.01 | −0.01 | −0.05 | −0.06 | +0.11 | −0.01 |
-| **factors only** | −0.01 | −0.08 | **+0.18** | **+0.05** | +0.09 | −0.14 |
-| full regime panel | −0.01 | −0.54 | +0.17 | −2.34 | +0.13 | −1.77 |
+| p_recession only | −0.11 | −0.00 | −0.10 | −0.02 | +0.20 | +0.00 |
+| regime signals (4) | −0.01 | −0.00 | −0.07 | −0.05 | +0.13 | −0.00 |
+| **factors only** | −0.03 | −0.01 | **+0.16** | **+0.06** | +0.07 | −0.10 |
+| full regime panel | −0.03 | −0.01 | +0.18 | −1.78 | +0.13 | −0.38 |
 
 **Direction and drawdown: no.** Every R² is negative. Nothing here beats
 predicting the historical average for returns or for worst peak-to-trough move.
@@ -613,19 +616,24 @@ factors.** The latent factors are the one feature set that beats the naive
 forecast on any target (vol R² +0.05), and the discrimination is the part that
 holds up:
 
-| | IC | R² |
-|---|---|---|
-| 3-month horizon | +0.178 | +0.054 |
-| 6-month horizon | +0.168 | +0.006 |
-| 12-month horizon | +0.181 | −0.034 |
+| | IC | R² | folds with R² > 0 |
+|---|---|---|---|
+| 3-month horizon | +0.162 | +0.063 | 4 of 5 |
+| 6-month horizon | +0.173 | +0.018 | 3 of 5 |
+| 12-month horizon | +0.161 | +0.063 | 4 of 5 |
 
-Per fold at 3 months, the IC is positive in **5 of 5** folds spanning five
-decades (+0.100, +0.293, +0.194, +0.144, +0.157) while R² is positive in only
-3 of 5. The GBM agrees on the sign (+0.135) and disagrees on R², so the ranking
-result is not an artifact of one estimator. Read that as: the factors carry
-consistent information about *which* periods will be more volatile than others,
-and much weaker information about *how* volatile. Rank-based use is supported;
-a level forecast is not.
+The IC is positive in **every one of the 15 fold-horizon combinations** above,
+and the GBM agrees on the sign (+0.135 at 3 months), so the ranking result is
+not an artifact of one estimator or one era. R² is positive but small, and in
+every horizon the negative fold is the same one — 2006-2016, which contains
+2008. A linear model ranks that period correctly and still misses its *level*,
+because the realised volatility of 2008 lies outside anything in its training
+range.
+
+Read that as: the factors carry consistent information about *which* periods
+will be more volatile than others, and much weaker information about *how*
+volatile. Rank-based use is supported; a point forecast of the level is not,
+and least of all in the tail, which is where it would matter most.
 
 This is a change from what this section said before, and two things changed
 under it. The panel it was computed from contained 25 rows where a failed DFM
@@ -652,9 +660,9 @@ machine. The single-column and factor-only sets are the only ones worth running.
 
 - **Directional prediction: no.** Nothing in this repository supports it.
 - **Volatility ranking: modestly supported.** `factor_*` columns, positive IC in
-  every fold over 1967–2026 and under both estimators. Use them to rank periods
-  by expected volatility, not to forecast its level, and size the expectation to
-  an IC near +0.18.
+  every fold over 1967–2026, at every horizon tested, and under both estimators.
+  Use them to rank periods by expected volatility, not to forecast its level,
+  and size the expectation to an IC near +0.16.
 - **Drawdown: no**, despite a +0.20 IC on `p_recession` — the R² is negative, so
   the ordering carries some information the magnitude does not support.
 - **Regime state as a conditioner or interaction term** remains the most
