@@ -44,6 +44,29 @@ def _fill_for_pca(arr: np.ndarray) -> np.ndarray:
     return filled
 
 
+# On a standardised panel every EM parameter is O(1): loadings and AR
+# coefficients near unity, variances at most a few.  Anything many orders
+# beyond that is a diverged EM, not a fit.
+#
+# Testing finiteness alone was not enough.  Overflow climbs to ~1e300
+# while staying perfectly finite, so ``last_good`` kept absorbing
+# already-diverged iterates and the "last finite estimate" the guard fell
+# back to was itself garbage — an R so large the Kalman gain underflowed
+# to zero, leaving the state pinned at its zero initialisation.  The fit
+# then returned 808 months of factors that were all exactly 0.0, with
+# finite parameters, the right shape and no error.  30 windows of a
+# 716-window walk-forward came back that way.
+_MAX_SANE_PARAM = 1e6
+
+
+def _params_are_sane(*matrices: np.ndarray) -> bool:
+    """True when every parameter is finite and on a plausible scale."""
+    return all(
+        np.isfinite(m).all() and np.max(np.abs(m)) <= _MAX_SANE_PARAM
+        for m in matrices
+    )
+
+
 def _default_sign_convention(loadings: np.ndarray) -> np.ndarray:
     """Orient each factor so its loadings sum positive.
 
@@ -190,8 +213,10 @@ class DynamicFactorModel:
         # matched to anchor loadings rather than assumed positionally.
         self._matched_factor_names: list[str] | None = None
         # Anchor-loading strength per assigned name, relative to the
-        # factor's average loading.  Below ~1.0 the name is not
-        # evidenced and should not be trusted by downstream code.
+        # factor's 90th-percentile loading.  Around 1.0 means the
+        # anchors are as strong as the series that define the factor;
+        # well below that, the name is not evidenced and downstream
+        # code should not select the factor by it.
         self._factor_match_quality: dict[str, float] = {}
         self._A: np.ndarray | None = None
         self._Q: np.ndarray | None = None
@@ -274,7 +299,8 @@ class DynamicFactorModel:
         C = C_init.copy()
 
         prev_ll = -np.inf
-        # Last parameter set known to be finite.  Panels spanning 2020
+        # Last parameter set known to be finite *and well-scaled*.  Panels
+        # spanning 2020
         # carry 20-sigma observations in the claims and payrolls series,
         # which can drive the EM to diverge: the M-step then returns NaN
         # loadings, and the failure only surfaces later inside varimax's
@@ -366,12 +392,13 @@ class DynamicFactorModel:
             R = np.diag(diag_R / counts)
 
             # Stop on divergence rather than propagating NaN downstream.
-            if not all(np.isfinite(m).all() for m in (A, C, Q, R)):
+            if not _params_are_sane(A, C, Q, R):
                 logger.warning(
                     f"DFM: EM diverged at iteration {iteration} "
-                    f"(non-finite parameters); keeping the last finite "
-                    f"estimate. This usually means extreme outliers in the "
-                    f"panel — check the standardised values around 2020."
+                    f"(non-finite or runaway parameters); keeping the last "
+                    f"well-scaled estimate. This usually means extreme "
+                    f"outliers in the panel — check the standardised values "
+                    f"around 2020."
                 )
                 A, C, Q, R = (m.copy() for m in last_good)
                 break
@@ -492,6 +519,26 @@ class DynamicFactorModel:
             else self.smoothed_factors_
         )
 
+        # A degenerate fit must fail here, not downstream.
+        #
+        # When the EM diverges badly enough the Kalman gain underflows and
+        # every state stays at its zero initialisation, so the estimator
+        # returns a factor frame of the right shape, with finite values and
+        # no error, in which every column is identically zero.  Callers
+        # then fit a regime model on it, get a degenerate transition
+        # matrix, fall back to an uninformative 0.5, and write the result
+        # out as if it were a reading.
+        factor_sd = np.nan_to_num(
+            np.asarray(self.factors_, dtype=float)
+        ).std(axis=0)
+        if float(np.max(factor_sd)) <= 1e-12:
+            raise RuntimeError(
+                f"DFM fit is degenerate: all {K} factors have zero variance "
+                f"over {T} observations. The EM did not converge to a usable "
+                f"parameter set — check the warning above and the "
+                f"standardised panel for extreme values."
+            )
+
         self._is_fitted = True
         logger.debug(
             f"DFM fitted: {T} obs × {N} series → {K} factors "
@@ -572,9 +619,13 @@ class DynamicFactorModel:
             "PAYEMS", "JTSJOL", "CES0500000003", "TEMPHELPS", "AWHAETP",
         ],
         "inflation": ["CPIAUCSL", "CPILFESL", "PCEPI", "PCEPILFE", "PPIFIS"],
-        "financial_stress": [
-            "BAA10Y", "BAMLH0A0HYM2", "VIXCLS", "NFCI", "TEDRATE",
-        ],
+        "financial_stress": ["NFCI", "ANFCI", "STLFSI2", "VIXCLS", "TEDRATE"],
+        # The panel contains two distinct rates factors that earlier
+        # configurations had no name for, so they were silently absorbed
+        # by whichever label the assignment had left over — which is how
+        # "labor_market" came to be a yield-curve factor.
+        "yield_curve": ["TERM_SPREAD", "T10Y3M", "T10Y2Y", "DFF", "TB3MS"],
+        "long_rates": ["GS10", "AAA", "T10YIE", "T5YIE"],
     }
 
     def _match_factors_to_names(
@@ -646,9 +697,17 @@ class DynamicFactorModel:
             if not idx:
                 self._factor_match_quality[names[j]] = float("nan")
                 continue
+            # Compare the anchors against the factor's *strongest*
+            # loadings, not its average.  An average-based ratio flatters
+            # a low-magnitude factor: at K=5 the CPI anchors scored 1.81
+            # on a factor whose top loadings were BAA, the regional-Fed
+            # surveys and CREDIT_SPREAD, with no price series anywhere
+            # near the top — the denominator was simply small.  Measuring
+            # against the 90th percentile asks the question that matters:
+            # are the anchors among the series that define this factor?
             anchor_strength = float(np.mean(np.abs(loadings[idx, k])))
-            typical = float(np.mean(np.abs(loadings[:, k]))) or 1.0
-            ratio = anchor_strength / typical
+            leading = float(np.quantile(np.abs(loadings[:, k]), 0.9)) or 1.0
+            ratio = anchor_strength / leading
             self._factor_match_quality[names[j]] = ratio
             if ratio < 1.0:
                 strongest = int(np.argmax(np.abs(loadings[:, k])))

@@ -25,6 +25,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import pandas as pd
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -37,6 +38,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start", default="2000-01-31", help="First as-of date")
     parser.add_argument("--end", default=None, help="Last as-of date")
+    parser.add_argument(
+        "--pipeline-start",
+        default=None,
+        help=(
+            "First date the data pipeline fetches. Defaults to 20 years "
+            "before --start, so the first window has history to fit on. "
+            "This used to be pinned at 1980-01-01, which silently skipped "
+            "every as-of date before then."
+        ),
+    )
     parser.add_argument(
         "--step", type=int, default=1, help="Months between as-of dates",
     )
@@ -81,10 +92,23 @@ def main() -> int:
         generate_feature_panel,
     )
 
+    # The pipeline must hold data well before the first as-of date: the
+    # DFM needs a history to estimate on and the expanding
+    # standardisation needs its minimum window. This was pinned at
+    # 1980-01-01 with no way to override it, so `--start 1967-01-31`
+    # failed its first 120 windows with "empty panel" — warned, skipped,
+    # and reported as a successful run 13 years and two recessions short.
+    # Those are the 1969-70 and 1973-75 recessions, which is most of what
+    # the reconstructed spreads were added to recover.
+    pipeline_start = args.pipeline_start or (
+        pd.Timestamp(args.start) - pd.DateOffset(years=20)
+    ).strftime("%Y-%m-%d")
+    logger.info(f"Data pipeline starts {pipeline_start} (as-of from {args.start})")
+
     client = FREDClient(api_key=api_key, cache_dir="data/cache")
     pipeline = DataPipeline(
         fred_client=client,
-        start_date="1980-01-01",
+        start_date=pipeline_start,
         series_config_path="config/fred_series.yaml",
         use_vintages=args.vintages,
     )

@@ -1,5 +1,7 @@
 model:
-  n_factors: 4
+  # 5 is the smallest K at which every factor has an evidenced name;
+  # see Nowcaster.DEFAULT_FACTOR_NAMES for the measured qualities.
+  n_factors: 5
   n_regimes: 2
   # Order matters and is validated at construction: regimes are sorted by
   # ascending mean, so the lowest-mean (recession) state must come first.
@@ -9,9 +11,10 @@ model:
     - expansion
   factor_names:
     - real_activity
-    - labor_market
     - inflation
     - financial_stress
+    - yield_curve
+    - long_rates
   em_max_iter: 200
   em_tol: 1.0e-6
   kalman:

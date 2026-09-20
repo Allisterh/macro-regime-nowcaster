@@ -88,14 +88,48 @@ def test_varimax_single_factor_noop():
     np.testing.assert_allclose(rotated, loadings)
 
 
-def test_dfm_rotated_factors_are_distinct(synthetic_panel):
-    """After varimax, factor time-series should be less correlated."""
-    dfm = DynamicFactorModel(n_factors=2, max_iter=20, rotate=True)
-    dfm.fit(synthetic_panel)
-    f = dfm.factors_.values
-    corr = np.abs(np.corrcoef(f.T)[0, 1])
-    # Rotated factors should have low cross-correlation
-    assert corr < 0.5, f"Factors too correlated after varimax: |r| = {corr:.3f}"
+def test_varimax_buys_simple_loadings_not_uncorrelated_factors(synthetic_panel):
+    """Varimax concentrates loadings; it does not orthogonalise factors.
+
+    This test used to assert the opposite — that rotated factor series
+    are *less* correlated than |r| = 0.5 — and it passed for as long as
+    the shared conftest RNG happened to hand it a panel where that held.
+    On this panel, measured:
+
+        unrotated  |corr(factors)| = 0.037   simple structure = 0.629
+        rotated    |corr(factors)| = 0.785   simple structure = 0.784
+
+    Rotation makes the factors *more* correlated, and that is correct
+    behaviour, not a defect. The Kalman filter already returns nearly
+    uncorrelated states; an orthogonal rotation of states with unequal
+    variances mixes them and induces correlation. What varimax buys is
+    interpretable loadings, which is the thing the factor names depend
+    on, so that is what this asserts.
+    """
+    def simple_structure(loadings: np.ndarray) -> float:
+        """Median share of a series' loading mass on its dominant factor."""
+        mag = np.abs(loadings)
+        return float(np.median(mag.max(axis=1) / (mag.sum(axis=1) + 1e-12)))
+
+    unrotated = DynamicFactorModel(
+        n_factors=2, max_iter=20, rotate=False
+    ).fit(synthetic_panel)
+    rotated = DynamicFactorModel(
+        n_factors=2, max_iter=20, rotate=True
+    ).fit(synthetic_panel)
+
+    plain = simple_structure(unrotated.get_loadings())
+    turned = simple_structure(rotated.get_loadings())
+
+    assert turned > plain, (
+        f"varimax did not improve loading simple structure: "
+        f"rotated={turned:.3f} vs unrotated={plain:.3f}"
+    )
+
+    # The factors must still be two distinct series, not one duplicated.
+    f = rotated.factors_.values
+    assert not np.allclose(f[:, 0], f[:, 1]), "rotation collapsed the factors"
+    assert float(np.min(f.std(axis=0))) > 1e-8, "a rotated factor is constant"
 
 
 def test_dfm_rotation_matrix_stored(synthetic_panel):

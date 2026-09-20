@@ -42,6 +42,9 @@ import pandas as pd
 from dotenv import load_dotenv
 from loguru import logger
 
+# Estimator definitions live in src/ so the dashboard's volatility panel
+# serves exactly what this script measures, rather than a second copy.
+from src.evaluation.downstream_models import build_models
 from src.evaluation.purged_cv import PurgedWalkForward
 from src.utils.logging_config import setup_logging
 
@@ -121,13 +124,12 @@ def evaluate(X: pd.DataFrame, y: pd.Series, model_fn, cv) -> tuple[float, float,
     )
 
 
+
+
 def main() -> int:
     args = parse_args()
     load_dotenv()
     setup_logging(level=args.log_level)
-
-    from sklearn.ensemble import GradientBoostingRegressor
-    from sklearn.linear_model import Ridge
 
     path = Path(args.features)
     if not path.exists():
@@ -166,12 +168,8 @@ def main() -> int:
         "factors only": [c for c in X.columns if c.startswith("factor_")],
         "full regime panel": list(X.columns),
     }
-    models = {
-        "ridge": lambda: Ridge(alpha=1.0),
-        "gbm": lambda: GradientBoostingRegressor(
-            random_state=0, n_estimators=100, max_depth=2
-        ),
-    }
+    models = build_models(label_horizon=args.horizon, embargo=args.embargo)
+
     cv = PurgedWalkForward(
         n_splits=args.splits, label_horizon=args.horizon,
         embargo=args.embargo, min_train=80,

@@ -77,6 +77,15 @@ WALK_FORWARD_PATH = Path("data/features.csv")
 _COARSE_SAMPLING_DAYS = 45
 
 
+def _ordinal(n: int) -> str:
+    """``53`` to ``53rd``. 11-13 take 'th' regardless of last digit."""
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def _rgba(hex_colour: str, alpha: float) -> str:
     """``#rrggbb`` to an ``rgba()`` string, for translucent CI bands."""
     h = hex_colour.lstrip("#")
@@ -118,6 +127,41 @@ def compute_horizon_curve():
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Could not compute the horizon curve: {exc}")
         return None
+
+
+@st.cache_resource(show_spinner="Fitting volatility outlook…")
+def load_volatility_outlook(horizon: int = 3):
+    """Fit the relative forward-volatility model, or explain why not.
+
+    Returns ``(outlook, message)``; exactly one is ever non-None. The
+    message is shown to the reader instead of a chart, because a panel
+    that silently renders nothing is indistinguishable from one that is
+    reporting calm.
+    """
+    if not WALK_FORWARD_PATH.exists():
+        return None, (
+            "Needs the walk-forward panel. Run "
+            "`python scripts/build_features.py --start 1967-01-31 --step 1`."
+        )
+    try:
+        import os
+
+        from src.data.fred_client import FREDClient
+        from src.models.volatility_outlook import fit_volatility_outlook
+
+        api_key = os.environ.get("FRED_API_KEY", "")
+        if not api_key:
+            return None, "FRED_API_KEY is not set, so prices cannot be fetched."
+        client = FREDClient(api_key=api_key, cache_dir="data/cache")
+        prices = pd.to_numeric(
+            client.get_series("NASDAQCOM"), errors="coerce"
+        ).dropna()
+        return fit_volatility_outlook(
+            prices, WALK_FORWARD_PATH, horizon=horizon
+        ), None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not fit the volatility outlook: {exc}")
+        return None, f"Could not fit the volatility outlook: {exc}"
 
 
 @st.cache_data(show_spinner=False)
@@ -198,7 +242,29 @@ with st.sidebar:
     st.title("⚙️ Controls")
     start_date = st.date_input("Start Date", value=pd.Timestamp("2000-01-01"))
     end_date = st.date_input("End Date", value=pd.Timestamp.today())
-    n_factors = st.slider("Latent Factors", min_value=1, max_value=8, value=4)
+    # Default from the model, not a literal. This slider read value=4
+    # after the validated default moved to 5, so the dashboard was
+    # silently running a configuration nobody had measured — and at 4 it
+    # also truncates DEFAULT_FACTOR_NAMES, dropping long_rates.
+    from src.models.nowcaster import Nowcaster as _NowcasterDefaults
+
+    _default_k = len(_NowcasterDefaults.DEFAULT_FACTOR_NAMES)
+    n_factors = st.slider(
+        "Latent Factors", min_value=1, max_value=8, value=_default_k,
+        help=(
+            f"{_default_k} is the validated default: the smallest number at "
+            f"which every factor has a name the loadings support."
+        ),
+    )
+    if n_factors != _default_k:
+        st.warning(
+            f"Running with {n_factors} factors instead of the validated "
+            f"{_default_k}. Below {_default_k} the factor names are "
+            f"truncated and one of the rates factors is dropped; above it, "
+            f"the extra factors are unnamed. Measured performance in the "
+            f"README does not apply.",
+            icon="⚠️",
+        )
     run_button = st.button("🔄 Run Nowcast", type="primary", use_container_width=True)
 
     st.markdown("---")
@@ -307,6 +373,10 @@ def _run_nowcast(start: str, end: str, n_fac: int):
             # by design, so a reading is typically one or two months old.
             "signal_as_of": dict(getattr(nowcaster, "_signal_as_of", {}) or {}),
             "weights": dict(nowcaster.ensemble_weights),
+            # How well the loadings support each factor name.
+            "factor_quality": dict(
+                getattr(nowcaster._dfm, "_factor_match_quality", {}) or {}
+            ),
         }, None
     except Exception as exc:  # noqa: BLE001
         logger.exception("Nowcast run failed")
@@ -370,11 +440,42 @@ else:
     # 2. Key metrics row
     # ==================================================================
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("GDP Nowcast", f"{result.gdp_nowcast:.2f}%",
-              f"CI: [{result.gdp_ci_lower:.1f}%, {result.gdp_ci_upper:.1f}%]")
+
+    # Streamlit renders a metric's delta with an arrow and a colour, which
+    # reads as a *change* and as good news. A confidence interval is
+    # neither, so it goes in the label and the arrow is turned off.
+    ci_width = result.gdp_ci_upper - result.gdp_ci_lower
+    m1.metric(
+        "GDP Nowcast",
+        f"{result.gdp_nowcast:.2f}%",
+        f"90% CI [{result.gdp_ci_lower:.1f}%, {result.gdp_ci_upper:.1f}%]",
+        delta_color="off",
+    )
     m2.metric("Recession Prob", f"{p_recession:.1%}")
     m3.metric("Current Regime", regime.title())
-    m4.metric("Model Signals", f"{len(result.ensemble_detail)} active")
+
+    # "N active" counted len(ensemble_detail), which includes the
+    # "ensemble" entry itself — so four signals were reported as five —
+    # and counted components carrying zero weight as though they were
+    # contributing.
+    weights = data.get("weights", {})
+    signal_keys = [k for k in result.ensemble_detail if k != "ensemble"]
+    weighted = [k for k in signal_keys if weights.get(k, 0.0) > 0]
+    m4.metric(
+        "Signals Weighted",
+        f"{len(weighted)} of {len(signal_keys)}",
+        ", ".join(sorted(weighted)) or "none",
+        delta_color="off",
+    )
+
+    if ci_width > 8.0:
+        st.caption(
+            f":warning: The GDP interval spans {ci_width:.0f} percentage "
+            f"points. The factors explain little quarter-to-quarter GDP "
+            f"variation — the residual standard error is inflated by the "
+            f"2020 quarters — so treat the point estimate as weakly "
+            f"identified rather than as a forecast."
+        )
 
     st.markdown("---")
 
@@ -532,20 +633,29 @@ else:
     # ==================================================================
     st.subheader("Latent Factors (DFM)")
     factor_cols = factors.columns.tolist()
-    n_cols = min(len(factor_cols), 4)
+    quality = data.get("factor_quality", {})
+
+    # Every factor gets a plot. This used to cap at four
+    # (min(len(factor_cols), 4)) and lay them out in a single row, so the
+    # fifth factor silently vanished when the default moved to K=5 —
+    # another literal restating something the model owns. Wrap instead.
+    per_row = 4
 
     # Determine the actual data range from factor values.
     # The Kalman smoother fills early rows with near-zero values when
     # few series are available; trim those by finding the first row
     # where any factor deviates meaningfully from zero (|z| > 0.05).
-    factors_plot = factors[factor_cols[:n_cols]].copy()
+    factors_plot = factors[factor_cols].copy()
     meaningful = factors_plot.abs().max(axis=1) > 0.05
     if meaningful.any():
         factors_plot = factors_plot.loc[meaningful.idxmax():]
 
-    factor_chart_cols = st.columns(n_cols)
-    for i, col_name in enumerate(factor_cols[:n_cols]):
-        with factor_chart_cols[i]:
+    row_slots: list = []
+    for i, col_name in enumerate(factor_cols):
+        if i % per_row == 0:
+            remaining = len(factor_cols) - i
+            row_slots = st.columns(min(per_row, remaining))
+        with row_slots[i % per_row]:
             series = factors_plot[col_name].dropna()
             # Clip to ±3σ for display only (model uses unclipped values)
             series_display = series.clip(-3.0, 3.0)
@@ -563,8 +673,19 @@ else:
             _add_nber_shading(fig_f)
 
             clean_name = col_name.replace("_", " ").title()
+            # Show how well the loadings support the name. A factor whose
+            # anchors are weak is a label of convenience, and the reader
+            # should be able to see that on the plot rather than trusting
+            # the title — this is exactly how a yield-curve factor came to
+            # be read as "labor market".
+            score = quality.get(col_name)
+            if score is not None and score == score:
+                mark = "✓" if score >= 1.0 else "?"
+                title_text = f"{clean_name}  <sub>{mark} {score:.2f}</sub>"
+            else:
+                title_text = clean_name
             fig_f.update_layout(
-                title=dict(text=clean_name, font=dict(size=13)),
+                title=dict(text=title_text, font=dict(size=13)),
                 height=200,
                 margin=dict(t=35, b=30, l=10, r=10),
                 xaxis=dict(
@@ -578,6 +699,19 @@ else:
                 yaxis=dict(title="z-score", range=[-3.5, 3.5]),
             )
             st.plotly_chart(fig_f, use_container_width=True)
+
+    if quality:
+        weak = [n for n, v in quality.items() if v == v and v < 1.0]
+        st.caption(
+            "The number beside each name is how strongly that factor's "
+            "anchor series load on it, relative to the factor's own "
+            "90th-percentile loading — ✓ means the name is supported by "
+            "the loadings, ? means it is a label of convenience."
+            + (
+                f" Currently weak: {', '.join(sorted(weak))}."
+                if weak else " All factor names are currently evidenced."
+            )
+        )
 
     st.markdown("---")
 
@@ -764,6 +898,104 @@ else:
             "overlap almost everywhere, so the orderings are suggestive "
             "rather than established."
         )
+
+    st.markdown("---")
+
+    # ==================================================================
+    # 6c. Relative forward-volatility outlook
+    # ==================================================================
+    # Deliberately a percentile, not a forecast. The factors rank future
+    # volatility consistently (IC positive in all 15 fold-horizon
+    # combinations measured) but predict its *level* weakly, and the one
+    # fold that is negative at every horizon is 2006-2016 — the model
+    # ranks 2008 correctly and still misses its magnitude. A number in
+    # large type here would be least reliable exactly when it mattered.
+    st.subheader("Forward Volatility Outlook (relative)")
+
+    outlook, vol_message = load_volatility_outlook(horizon=3)
+    if outlook is None:
+        st.caption(vol_message)
+    else:
+        try:
+            live_factors = factors.rename(
+                columns={c: f"factor_{c}" for c in factors.columns}
+            )
+            assessment = outlook.assess(live_factors.dropna().iloc[-1])
+        except (KeyError, ValueError, IndexError) as exc:
+            assessment = None
+            st.caption(f"Current factors are not usable for the outlook: {exc}")
+
+        if assessment is not None:
+            pct = assessment["percentile"]
+            band = (
+                "elevated" if pct >= 70 else
+                "subdued" if pct <= 30 else
+                "middling"
+            )
+            colour = (
+                "#e74c3c" if pct >= 70 else
+                "#27ae60" if pct <= 30 else
+                "#f39c12"
+            )
+
+            vcol1, vcol2 = st.columns([1, 2])
+            with vcol1:
+                st.markdown(
+                    f"<div style='font-size:2.6rem;font-weight:700;"
+                    f"color:{colour};line-height:1.1'>{_ordinal(round(pct))}</div>"
+                    f"<div style='color:#7f8c8d'>percentile of this model's "
+                    f"own history — <b>{band}</b></div>",
+                    unsafe_allow_html=True,
+                )
+                ic_text = (
+                    f"{outlook.oos_ic:+.3f}" if outlook.oos_ic is not None
+                    else "not measurable"
+                )
+                st.caption(
+                    f"Out-of-sample IC {ic_text} over {outlook.oos_folds} "
+                    f"purged folds, {outlook.horizon}-month horizon."
+                )
+
+            with vcol2:
+                hist = outlook.history.dropna()
+                fig_v = go.Figure()
+                fig_v.add_trace(go.Histogram(
+                    x=hist.values, nbinsx=48,
+                    marker=dict(color="#bdc3c7"), name="history",
+                    hovertemplate="predicted %{x:.1%}<extra></extra>",
+                ))
+                fig_v.add_vline(
+                    x=assessment["prediction"], line=dict(color=colour, width=3),
+                )
+                fig_v.update_layout(
+                    height=200, margin=dict(t=10, b=30, l=10, r=10),
+                    showlegend=False,
+                    xaxis=dict(title="model-predicted forward volatility",
+                               tickformat=".0%"),
+                    yaxis=dict(title="months"),
+                    plot_bgcolor="white",
+                )
+                st.plotly_chart(fig_v, use_container_width=True)
+
+            n_comp = assessment["n_comparable"]
+            if n_comp:
+                st.caption(
+                    f"**What that meant historically.** In the {n_comp} months "
+                    f"when this model predicted around today's level, realised "
+                    f"{outlook.horizon}-month volatility landed between "
+                    f"{assessment['realised_p25']:.1%} and "
+                    f"{assessment['realised_p75']:.1%} (median "
+                    f"{assessment['realised_median']:.1%}). That spread is the "
+                    f"honest magnitude — the model ranks periods far better "
+                    f"than it sizes them, so it is shown as a range of "
+                    f"outcomes rather than a forecast."
+                )
+            st.caption(
+                ":grey[Ranking only. Out-of-sample R² is +0.02 to +0.06 across "
+                "3/6/12-month horizons, and the one fold negative at every "
+                "horizon spans 2008 — the level is least reliable in a crisis, "
+                "which is when it would matter most. Do not trade the number.]"
+            )
 
     st.markdown("---")
 

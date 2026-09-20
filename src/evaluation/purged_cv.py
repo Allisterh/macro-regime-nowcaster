@@ -132,9 +132,18 @@ class PurgedWalkForward:
     min_train: int = 60
 
     def split(
-        self, X: pd.DataFrame | pd.Series | pd.Index | np.ndarray
+        self,
+        X: pd.DataFrame | pd.Series | pd.Index | np.ndarray,
+        y=None,
+        groups=None,
     ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-        """Yield ``(train_idx, test_idx)`` positional index pairs."""
+        """Yield ``(train_idx, test_idx)`` positional index pairs.
+
+        *y* and *groups* are accepted and ignored, so this can be handed
+        straight to scikit-learn as a ``cv=`` argument — which is what
+        makes an honest inner loop possible for hyper-parameter
+        selection. Splits depend only on position, never on the target.
+        """
         n = len(X)
         if n == 0:
             return
