@@ -11,7 +11,7 @@ model:
     - expansion
   factor_names:
     - real_activity
-    - inflation
+    - credit_premium
     - financial_stress
     - yield_curve
     - long_rates

@@ -24,6 +24,9 @@ is precisely the kind that a slow, rarely-run test would not catch.
 from __future__ import annotations
 
 import inspect
+import shutil
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -34,6 +37,22 @@ from src.models.walk_forward import (
     generate_feature_panel,
     generate_features_asof,
 )
+
+
+@pytest.fixture
+def scratch():
+    """A throwaway directory.
+
+    Uses ``tempfile`` rather than pytest's ``tmp_path`` because this
+    environment's pytest basetemp is not writable; ``test_walk_forward``
+    does the same.
+    """
+    path = Path(tempfile.mkdtemp())
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
 
 _IDX = pd.date_range("2000-01-31", periods=60, freq="ME")
 
@@ -236,3 +255,63 @@ def test_the_failure_threshold_can_be_relaxed(monkeypatch):
         max_failure_fraction=1.0,
     )
     assert panel.index[0] >= pd.Timestamp("1980-01-01")
+
+
+# ---------------------------------------------------------------------------
+# 5. A cache from superseded code must not be resumed from
+# ---------------------------------------------------------------------------
+
+
+def test_cache_without_knowable_at_is_ignored(monkeypatch, scratch):
+    """A stale cache in an old schema must not be merged into a fresh run.
+
+    ``data/oos_validation_interim.csv`` was sitting in the repository in
+    the superseded ``p_rsm, p_probit, p_cfnai, p_ensemble`` format, with
+    an inverted RSM at 0.98 and a probit pinned to its since-removed 0.05
+    clip floor. ``run_validation.py`` passes that path as ``cache_path``,
+    so a run today would have resumed from 28 rows of known-bad numbers
+    under column names nothing downstream reads — and the metrics
+    computed over the result would have looked entirely ordinary.
+    """
+    stale = scratch / "old_format.csv"
+    pd.DataFrame(
+        {"p_rsm": [0.98, 0.98], "p_probit": [0.05, 0.05]},
+        index=pd.to_datetime(["1990-01-31", "1990-02-28"]),
+    ).to_csv(stale)
+
+    _failing_panel(monkeypatch, fail_before="1900-01-01")  # nothing fails
+
+    panel = generate_feature_panel(
+        object(), start="1990-01-31", end="1992-01-31", step_months=1,
+        cache_path=stale,
+    )
+
+    assert "p_rsm" not in panel.columns, (
+        "columns from a superseded cache schema leaked into the panel"
+    )
+    assert panel["p_recession"].notna().all(), (
+        "rows resumed from the stale cache left holes in the output"
+    )
+
+
+def test_a_matching_cache_is_still_resumed(monkeypatch, scratch):
+    """The guard must not disable resuming, which is why the cache exists."""
+    good = scratch / "partial.csv"
+    pd.DataFrame(
+        {
+            "p_recession": [0.11, 0.22],
+            "knowable_at": pd.to_datetime(["1990-04-01", "1990-05-01"]),
+        },
+        index=pd.to_datetime(["1990-01-31", "1990-02-28"]),
+    ).to_csv(good)
+
+    _failing_panel(monkeypatch, fail_before="1900-01-01")
+
+    panel = generate_feature_panel(
+        object(), start="1990-01-31", end="1992-01-31", step_months=1,
+        cache_path=good,
+    )
+
+    # The cached values must survive rather than being recomputed.
+    assert panel.loc[pd.Timestamp("1990-01-31"), "p_recession"] == 0.11
+    assert panel.loc[pd.Timestamp("1990-02-28"), "p_recession"] == 0.22

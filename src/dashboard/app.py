@@ -4,11 +4,15 @@ Panels:
     1. Colour-coded regime banner with key metrics
     2. Ensemble recession probability gauge + breakdown
     3. Regime probability time-series chart (stacked area, NBER shaded)
-    4. Latent factor time series (4 panels)
+    4. Latent factor time series — one per factor, however many the model
+       defines (this said "4 panels" while the model had moved to five,
+       and the grid itself was capped to match)
     5. Regime timeline with NBER recession shading
-    6. Asset allocation pie chart (from RegimeAllocator)
-    7. LLM narrative summary card (NarrativeAgent + FedScraper)
-    8. Recent regime probability data table
+    6. Discrimination by forecast horizon, with bootstrap bands
+    7. Forward volatility outlook, as a percentile rather than a forecast
+    8. Asset allocation pie chart (from RegimeAllocator)
+    9. LLM narrative summary card (NarrativeAgent + FedScraper)
+    10. Recent regime probability data table
 
 Run with:
     streamlit run src/dashboard/app.py

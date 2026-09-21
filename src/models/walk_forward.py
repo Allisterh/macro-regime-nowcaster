@@ -297,10 +297,30 @@ def generate_feature_panel(
     cache_file = Path(cache_path) if cache_path else None
     if cache_file is not None and cache_file.exists():
         prior = pd.read_csv(cache_file, index_col=0, parse_dates=True)
-        if "knowable_at" in prior.columns:
+        # A cache from a superseded schema must not be resumed from.
+        #
+        # Every row this function emits carries `knowable_at`, so its
+        # absence means the file was written by different code. One was
+        # sitting in the repository: data/oos_validation_interim.csv, in
+        # the old `p_rsm, p_probit, p_cfnai, p_ensemble` format, with an
+        # inverted RSM at 0.98 and a probit pinned to its since-removed
+        # 0.05 clip floor. Resuming from it would have merged 28 rows of
+        # known-bad numbers, under column names nothing downstream reads,
+        # into a fresh run — and the metrics computed over the result
+        # would have looked entirely ordinary.
+        if "knowable_at" not in prior.columns:
+            logger.warning(
+                f"Ignoring {cache_file}: it has no knowable_at column, so it "
+                f"was written by a superseded version of this function "
+                f"(columns: {list(prior.columns)[:6]}). Recomputing from "
+                f"scratch; delete the file to silence this."
+            )
+        else:
             prior["knowable_at"] = pd.to_datetime(prior["knowable_at"])
-        cached = {ts: r for ts, r in prior.to_dict("index").items()}
-        logger.info(f"Resuming from {len(cached)} cached rows in {cache_file}")
+            cached = {ts: r for ts, r in prior.to_dict("index").items()}
+            logger.info(
+                f"Resuming from {len(cached)} cached rows in {cache_file}"
+            )
 
     rows: dict[pd.Timestamp, dict] = dict(cached)
     total = len(dates)
