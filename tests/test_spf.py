@@ -108,3 +108,49 @@ def test_as_of_never_back_fills():
     seen = as_of(values, known, pd.date_range("1999-10-31", periods=6, freq="ME"))
     assert seen.loc[:"2000-02-29"].isna().all()
     assert (seen.loc["2000-03-31":] == 0.3).all()
+
+
+# ---------------------------------------------------------------------------
+# The benchmark must give the SPF the model's cutoff, not a later one
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_rows_see_only_surveys_published_by_the_reference_month():
+    """The model's row for month T uses data published by T; so must the SPF.
+
+    The first version of the benchmark aligned the SPF to ``knowable_at``,
+    which is T plus 60 days — a buffer for joining downstream targets, not
+    the model's information cutoff. With surveys publishing ~45 days into
+    each quarter, that routinely handed the SPF the *next* survey. It made
+    a 50/50 blend look like a +0.025 AUC improvement with an interval
+    excluding zero; correctly aligned, the gain was +0.001 and the blend
+    was significantly worse calibrated after 1990.
+    """
+    from scripts.measure_spf import build_frame
+
+    ref = pd.Timestamp("2000-03-31")
+    feats = pd.DataFrame(
+        {
+            "p_recession": [0.2],
+            "signal_cfnai": [0.1],
+            "knowable_at": [ref + pd.Timedelta(days=60)],
+        },
+        index=pd.DatetimeIndex([ref]),
+    )
+    quarters = pd.DatetimeIndex(["2000-01-01", "2000-04-01"])
+    recess = pd.DataFrame(
+        {"RECESS1": [0.05, 0.90], "RECESS2": [0.06, 0.80]}, index=quarters
+    )
+    # Q1 published before the reference month ends; Q2 published between
+    # the reference month and knowable_at.
+    releases = pd.Series(
+        [pd.Timestamp("2000-02-15"), pd.Timestamp("2000-05-15")],
+        index=quarters,
+    )
+
+    frame = build_frame(feats, recess, releases, lag_days=45)
+
+    assert frame.loc[ref, "recess1"] == pytest.approx(0.05), (
+        "the row for March 2000 saw a survey published in May — information "
+        "the model's own row for that month did not have"
+    )

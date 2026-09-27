@@ -43,7 +43,7 @@ and [Is It Useful Downstream?](#is-it-useful-downstream)
 | Discrimination vs CFNAI | **+0.070 AUC, P = 0.98** (CI excludes zero, narrowly) |
 | Calibration vs CFNAI | **27% better, P = 1.00** (CI excludes zero) |
 | Forecasting 12 months out | AUC 0.660 — modest, but ahead of CFNAI's 0.634 |
-| Against professional forecasters (SPF) | **a statistical tie** — and averaging the two adds **+0.02 to +0.03 AUC**, CI excluding zero |
+| Against professional forecasters (SPF) | **ahead** in every scenario, though not significantly; blending the two adds nothing |
 | Predicting forward equity returns | **no skill** (negative R² everywhere) |
 | Predicting forward volatility | **no reliable skill** — IC +0.01 on the factor levels; the wider set reaches +0.08 but only after 1996 |
 | Predicting forward drawdown | **no skill** (negative R² everywhere) |
@@ -570,14 +570,15 @@ is a consensus probability recorded in real time — what prediction markets
 offer, with the 55 years of history they lack, covering all eight recessions.
 
 **Point-in-time alignment is the whole game.** Each row is scored with the
-latest survey *published* by that row's `knowable_at`, the same cutoff as the
-model, using the Philadelphia Fed's own release dates. That matters: the 1990Q2
-survey was taken retroactively in August 1990, so treating it as known in May
-would hand it the start of the July 1990 recession. Surveys before 1990Q2 have
-no published release date, so results are shown under three assumed lags from
-the start of the survey quarter — 45 days (modern practice; post-1990 surveys
-publish a median 45 days in), 90 and 120 — plus the post-1990 sample where every
-date is known.
+latest survey *published* by that row's reference month-end — the model's own
+information cutoff, since the walk-forward masks every input against it — using
+the Philadelphia Fed's release dates. The 1990Q2 survey, for instance, was taken
+retroactively in August 1990; treating it as known in May would hand it the
+start of the July 1990 recession. Surveys before 1990Q2 have no published
+release date, so results are shown under three assumed lags from the start of
+the survey quarter — 45 days (modern practice; post-1990 surveys publish a
+median 45 days in), 90 and 120 — plus the post-1990 sample where every date is
+known.
 
 The questions were fixed before any result was seen, and nothing else was
 searched over: SPF alone against the ensemble, and a fixed, untuned 50/50
@@ -585,52 +586,54 @@ average of the two against the ensemble.
 
 | | SPF − ensemble, AUC | 50/50 blend − ensemble, AUC | blend − ensemble, Brier |
 |---|---|---|---|
-| lag 45d (optimistic) | +0.016 [−0.020, +0.085] | **+0.028 [+0.005, +0.079]** | **−0.015 [−0.039, −0.002]** |
-| lag 90d (central) | +0.009 [−0.028, +0.076] | **+0.025 [+0.003, +0.073]** | **−0.013 [−0.037, −0.001]** |
-| lag 120d (conservative) | −0.000 [−0.040, +0.065] | **+0.020 [+0.001, +0.061]** | −0.011 [−0.030, +0.002] |
-| post-1990 only | −0.004 [−0.064, +0.110] | +0.018 [−0.002, +0.112] | −0.003 [−0.013, +0.005] |
+| lag 45d (optimistic) | −0.020 [−0.062, +0.044] | +0.005 [−0.011, +0.036] | −0.005 [−0.025, +0.009] |
+| lag 90d (central) | −0.036 [−0.088, +0.027] | +0.001 [−0.015, +0.028] | −0.003 [−0.022, +0.012] |
+| lag 120d (conservative) | −0.050 [−0.116, +0.019] | −0.002 [−0.020, +0.024] | −0.002 [−0.020, +0.014] |
+| post-1990 only | −0.052 [−0.153, +0.030] | −0.010 [−0.041, +0.024] | **+0.007 [+0.003, +0.024]** |
 
-**The model ties the professionals.** Every interval on SPF-versus-ensemble
-straddles zero. The SPF's edge also shrinks steadily as it is denied hindsight
-about its unknown early release dates — +0.016, +0.009, −0.000 — which is the
-signature of look-ahead, not skill; with every date known, post-1990, the
-ensemble is fractionally ahead.
+**The model is ahead of the professionals.** Not significantly — every interval
+on SPF-versus-ensemble includes zero — but consistently: the point estimate
+favours the model in every scenario, and increasingly so as the SPF is denied
+hindsight about its unknown early release dates. On the post-1990 sample, where
+every date is known, the ensemble scores 0.948 and the SPF 0.896.
 
-**Combining them helps, modestly.** The blend beats the ensemble in every
-scenario, and its AUC gain excludes zero under all three timing assumptions. It
-also beats *both* of its parts (central: 0.963 against 0.947 for the SPF and
-0.938 for the ensemble), which is what complementary information looks like, as
-opposed to one signal simply being the better one. Read it carefully all the
-same: the gain shrinks as the early lag grows, the Brier improvement loses
-significance under the conservative lag, and the post-1990 sample alone — four
-recessions rather than eight — is too short to confirm it, although its point
-estimate agrees.
-
-**By horizon, they divide the work.**
+**Blending them adds nothing, and after 1990 it hurts.** The AUC change is
+about 0.01 or less in every scenario, with every interval spanning zero. On the post-1990 sample the blend is
+*significantly worse calibrated* than the ensemble alone — the one interval in
+the table that excludes zero points the wrong way. The SPF was therefore **not
+added to the model**.
 
 | Horizon | Ensemble | SPF RECESS1 | SPF RECESS2 | Blend |
 |---|---|---|---|---|
-| 0m | 0.938 | 0.947 | 0.937 | **0.963** |
-| 3m | 0.881 | 0.890 | 0.904 | **0.908** |
-| 6m | 0.800 | 0.784 | 0.825 | **0.829** |
-| 9m | 0.719 | 0.662 | 0.722 | **0.744** |
-| 12m | **0.673** | 0.540 | 0.617 | 0.668 |
-| 18m | **0.592** | 0.365 | 0.509 | 0.545 |
+| 0m | **0.938** | 0.902 | 0.910 | **0.938** |
+| 3m | 0.882 | 0.817 | 0.853 | **0.884** |
+| 6m | **0.801** | 0.694 | 0.746 | **0.801** |
+| 9m | **0.720** | 0.567 | 0.643 | 0.719 |
+| 12m | **0.674** | 0.460 | 0.560 | 0.649 |
+| 18m | **0.589** | 0.352 | 0.458 | 0.539 |
 
-The SPF helps out to nine months; beyond that the model is better, and the
-current-quarter reading turns actively misleading — 0.365 at eighteen months,
-below chance, because high recession odds *now* predict a recovery a year and a
-half out.
+The model beats both SPF readings at every horizon. The blend matches it to
+within 0.002 out to six months and falls behind beyond that. The SPF's
+current-quarter reading drops below chance from twelve months out — high
+recession odds *now* predict a recovery later, not a recession.
 
-One expectation written into the script beforehand was **wrong**: that the SPF's
-standalone Brier would lose, since it prices a quarter of falling GDP rather
-than an NBER recession month. Over the full sample it wins (0.062 against
-0.072); only post-1990 does the ensemble come out ahead.
+**This section first reported the opposite, and the difference is instructive.**
+The first version aligned the SPF to each row's `knowable_at` — the reference
+month plus 60 days — on the belief that this was the model's cutoff. It is not:
+it is a conservative buffer for joining *downstream* targets. Because surveys
+publish about 45 days into each quarter, those extra 60 days routinely handed
+the SPF the *next* survey, and the result was a 50/50 blend that appeared to
+add +0.025 AUC with an interval excluding zero, and an SPF that appeared to tie
+the model. The error surfaced when the SPF was about to be built into the
+model, on the strength of that result. Correctly aligned, the gain is +0.001.
+`tests/test_spf.py` now fails if a benchmark row can see a survey published
+after its reference month.
 
-The SPF is **not yet part of the model** — whether to add it, and at what weight,
-is a separate decision. The 50/50 weight was fixed in advance precisely so this
-result would not be a tuned one; choosing a better weight would need its own
-out-of-sample selection.
+One expectation stated before the first run also turns out to have been right
+after all: that the SPF's standalone Brier would lose, because it prices a
+quarter of falling GDP rather than an NBER recession month. The misaligned run
+appeared to contradict it; correctly aligned, the SPF scores 0.0825 against the
+ensemble's 0.0715.
 
 ```bash
 python scripts/measure_spf.py      # downloads the SPF files on first run

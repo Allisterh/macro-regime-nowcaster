@@ -27,8 +27,10 @@ Not searched: RECESS3-5, blend weights, median instead of mean.
 Alignment
 ---------
 Each panel row is scored with the latest survey *published* by that
-row's ``knowable_at`` — the same information cutoff as the model. Surveys
-before 1990Q2 have no published release date, so results are reported
+row's reference month-end — the model's own information cutoff, since
+the walk-forward masks every input against it. (Not ``knowable_at``,
+which adds a 60-day buffer for downstream joins; see ``build_frame``.)
+Surveys before 1990Q2 have no published release date, so results are reported
 under three assumed lags from the start of the survey quarter, plus the
 post-1990 subsample where every date is known. A conclusion that holds
 only under the optimistic lag would be one that look-ahead is carrying.
@@ -89,9 +91,22 @@ def build_frame(
     feats: pd.DataFrame, recess: pd.DataFrame, releases: pd.Series,
     lag_days: int,
 ) -> pd.DataFrame:
-    """Signals for each panel row, all at the row's knowable_at."""
+    """Signals for each panel row, all at the model's information cutoff.
+
+    That cutoff is the reference month-end itself. The walk-forward runs
+    the pipeline with ``end_date`` set to the reference month, and the
+    pipeline masks the ragged edge against ``end_date``, so the model's
+    row for month T sees only data published by T.
+
+    A first version aligned the SPF to ``knowable_at`` instead — T plus
+    60 days. That column is a conservative buffer for joining downstream
+    targets, not the model's cutoff, and using it handed the SPF up to 60
+    days the model never had. With surveys publishing about 45 days into
+    each quarter, that routinely meant the *next* survey, and it inflated
+    the SPF in every comparison it was part of.
+    """
     knowable = knowable_dates(recess.index, releases, lag_days)
-    when = pd.DatetimeIndex(feats["knowable_at"])
+    when = pd.DatetimeIndex(feats.index)
     frame = pd.DataFrame(index=feats.index)
     frame["ensemble"] = feats["p_recession"]
     frame["cfnai"] = feats["signal_cfnai"]
