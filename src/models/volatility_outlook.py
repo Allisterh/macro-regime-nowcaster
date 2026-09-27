@@ -1,45 +1,46 @@
 """Relative forward-volatility outlook from the latent factors.
 
-What the evidence supports, and what it does not
-------------------------------------------------
-Measured over 1967-2026 on the point-in-time panel, under purged and
-embargoed walk-forward CV (``scripts/benchmark_features.py``), the
-latent factors carry information about forward NASDAQ volatility:
+The evidence this was built on did not survive
+----------------------------------------------
+This module was written when the latent factors appeared to rank forward
+NASDAQ volatility consistently: out-of-sample IC of +0.157 to +0.187 at
+3, 6 and 12 months, positive in every fold of a purged walk-forward.
 
-    horizon   IC       R²      folds with R² > 0
-    3 months  +0.162   +0.063  4 of 5
-    6 months  +0.173   +0.018  3 of 5
-    12 months +0.161   +0.063  4 of 5
+That panel was produced by a DFM whose EM diverged on long windows,
+leaving two of five factors with no loadings. Rebuilt with the EM fixed,
+the same code on the same five factor levels measures:
 
-The IC is positive in **all 15** fold-horizon combinations, and the
-gradient-boosted model agrees on the sign, so the *ranking* is not an
-artifact of one estimator or one era.
+    horizon    old panel   rebuilt panel
+    3 months   +0.157      +0.009
+    6 months   +0.187      -0.010
+    12 months  +0.180      +0.031
 
-The level is a different matter. R² is small, and at every horizon the
-negative fold is the same one — 2006-2016, which contains 2008. A linear
-model ranks that period correctly and still misses its magnitude,
-because the realised volatility of 2008 is outside anything in its
-training range. A point forecast would therefore be least trustworthy in
-exactly the conditions that would make anyone want one.
+Effectively zero. The benchmark's wider "factors only" set, which adds
+the 1/3/6-month momentum columns, does somewhat better (+0.03 to +0.08)
+but splits by era: positive in every fold after 1996, negative or
+inverted in most before it. That is not a relationship this module can
+stand on.
 
-This module is built around that asymmetry. It reports a **percentile**
-— where the current reading sits against the model's own history — and
-exposes the level only as supporting detail, clearly bounded. Do not
-promote the level to a headline number without new evidence.
+So nothing is hard-coded here any more. ``fit_volatility_outlook``
+measures the out-of-sample IC of the exact specification it serves, and
+:attr:`VolatilityOutlook.has_usable_signal` decides from that
+measurement whether a reading may be shown at all. On the current panel
+it says no, and the dashboard shows why instead of a percentile of
+noise.
 
-Both the estimator and the CV splitter are imported rather than
-redefined, so what this serves is what the benchmark measured.
+If a future panel restores the signal, the gate lets it back through
+without a code change — which is the point of measuring it rather than
+writing it down.
 
-One deliberate difference. The benchmark's "factors only" set is every
-``factor_*`` column, which includes the 1/3/6-month momentum columns —
-20 in all, scoring +0.162. This module uses the five factor *levels*
-only, for two reasons: a current reading then needs nothing but the
-current factor row, and the panel's momentum columns are point-in-time
-differences between separate fits, which a live single-fit dashboard
-cannot reproduce faithfully. Rather than quote a number measured on a
-different specification, ``fit_volatility_outlook`` measures the IC of
-the specification it actually serves (+0.157 on the current panel) and
-reports that.
+Design, for when it does apply
+------------------------------
+It reports a **percentile** — where the current reading sits against
+the model's own history — rather than a level, and gives magnitude only
+as the empirical spread of what volatility did in comparable months.
+Both the estimator and the CV splitter are imported from the benchmark
+rather than redefined. It uses the five factor *levels*, not the
+momentum columns, because a live single-fit dashboard cannot reproduce
+momentum computed as differences between separate point-in-time fits.
 """
 
 from __future__ import annotations
@@ -63,6 +64,20 @@ DEFAULT_PANEL = "data/features.csv"
 # thin to be meaningful and fitting is refused outright.
 MIN_OBSERVATIONS = 120
 
+# Evidence required before a reading is shown. Both must hold:
+#
+# - The mean out-of-sample IC must reach MIN_USABLE_IC. The panel that
+#   justified building this measured +0.157; the rebuilt one measures
+#   +0.009. 0.05 sits well clear of both, so the gate separates the two
+#   cases this module has actually encountered rather than splitting
+#   hairs near either.
+# - The IC must be positive in all but at most one fold. The original
+#   claim rested on sign consistency across eras, not on the mean, and a
+#   mean can be carried by a single strong fold — the momentum-inclusive
+#   benchmark set reaches +0.08 at 3 months while inverting in 1976-86.
+MIN_USABLE_IC = 0.05
+MAX_NEGATIVE_FOLDS = 1
+
 
 @dataclass
 class VolatilityOutlook:
@@ -80,7 +95,36 @@ class VolatilityOutlook:
     # benchmark uses. None when too few folds were available.
     oos_ic: float | None = None
     oos_folds: int = 0
+    # Per-fold out-of-sample ICs, so sign consistency can be judged and
+    # shown rather than inferred from the mean.
+    oos_fold_ics: list[float] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+
+    @property
+    def has_usable_signal(self) -> bool:
+        """Whether the measured evidence supports showing a reading at all.
+
+        Decided from this panel's own out-of-sample measurement, never
+        from a number written into the code — the number written here
+        before was +0.157, and it stopped being true when the panel was
+        rebuilt.
+        """
+        if self.oos_ic is None or not self.oos_fold_ics:
+            return False
+        negative = sum(ic <= 0 for ic in self.oos_fold_ics)
+        return self.oos_ic >= MIN_USABLE_IC and negative <= MAX_NEGATIVE_FOLDS
+
+    @property
+    def evidence_summary(self) -> str:
+        """One line describing the measurement behind the gate."""
+        if self.oos_ic is None:
+            return "out-of-sample IC could not be measured"
+        positive = sum(ic > 0 for ic in self.oos_fold_ics)
+        return (
+            f"out-of-sample IC {self.oos_ic:+.3f}, positive in {positive} "
+            f"of {len(self.oos_fold_ics)} purged folds, "
+            f"{self.horizon}-month horizon"
+        )
 
     def percentile_of(self, prediction: float) -> float:
         """Where *prediction* sits in the model's own historical range."""
@@ -225,9 +269,10 @@ def fit_volatility_outlook(
         )
 
     notes: list[str] = []
-    oos_ic, folds = None, 0
+    oos_ic, fold_ics = None, []
     if measure_ic:
-        oos_ic, folds = _measure_oos_ic(X, y, horizon)
+        fold_ics = _measure_oos_fold_ics(X, y, horizon)
+        oos_ic = float(np.mean(fold_ics)) if fold_ics else None
         if oos_ic is None:
             notes.append("out-of-sample IC could not be measured on this panel")
 
@@ -246,18 +291,19 @@ def fit_volatility_outlook(
         realised=y,
         factor_columns=factor_columns,
         oos_ic=oos_ic,
-        oos_folds=folds,
+        oos_folds=len(fold_ics),
+        oos_fold_ics=fold_ics,
         notes=notes,
     )
 
 
-def _measure_oos_ic(
+def _measure_oos_fold_ics(
     X: pd.DataFrame, y: pd.Series, horizon: int
-) -> tuple[float | None, int]:
-    """Out-of-sample IC under the same purged CV the benchmark uses.
+) -> list[float]:
+    """Per-fold out-of-sample IC under the benchmark's purged CV.
 
-    Reported next to the reading so the panel states its own reliability
-    rather than leaving the viewer to assume it.
+    Returned per fold rather than averaged, because the gate needs sign
+    consistency and a mean can be carried by one strong fold.
     """
     cv = PurgedWalkForward(
         n_splits=5, label_horizon=horizon, embargo=3, min_train=80
@@ -270,6 +316,4 @@ def _measure_oos_ic(
         actual = y.iloc[test_idx].to_numpy()
         if np.std(pred) > 1e-12 and np.std(actual) > 1e-12:
             ics.append(float(np.corrcoef(pred, actual)[0, 1]))
-    if not ics:
-        return None, 0
-    return float(np.mean(ics)), len(ics)
+    return ics

@@ -269,7 +269,7 @@ with st.sidebar:
             f"README does not apply.",
             icon="⚠️",
         )
-    run_button = st.button("🔄 Run Nowcast", type="primary", use_container_width=True)
+    run_button = st.button("🔄 Run Nowcast", type="primary", width="stretch")
 
     st.markdown("---")
     st.markdown("**Architecture**")
@@ -535,7 +535,7 @@ else:
                 height=250,
                 margin=dict(l=10, r=10, t=10, b=30),
             )
-            st.plotly_chart(fig_ens, use_container_width=True)
+            st.plotly_chart(fig_ens, width="stretch")
 
             # Say how old each reading is. Publication lags mask the last
             # month or two of every series, so a signal is normally one or
@@ -578,14 +578,14 @@ else:
             margin=dict(t=10, b=10, l=10, r=10),
             showlegend=False,
         )
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, width="stretch")
 
         # Show allocation table
         alloc_df = pd.DataFrame(
             {"Weight": [f"{v:.1%}" for v in allocation.values()]},
             index=[k.title() for k in allocation.keys()],
         )
-        st.dataframe(alloc_df, use_container_width=True)
+        st.dataframe(alloc_df, width="stretch")
 
     st.markdown("---")
 
@@ -622,7 +622,7 @@ else:
             height=350,
             margin=dict(l=10, r=10, t=10, b=30),
         )
-        st.plotly_chart(fig_probs, use_container_width=True)
+        st.plotly_chart(fig_probs, width="stretch")
         st.caption(
             "In-sample: the model is fitted on the full selected window, so past "
             "months are scored with parameters estimated partly from later data. "
@@ -702,7 +702,7 @@ else:
                 ),
                 yaxis=dict(title="z-score", range=[-3.5, 3.5]),
             )
-            st.plotly_chart(fig_f, use_container_width=True)
+            st.plotly_chart(fig_f, width="stretch")
 
     if quality:
         weak = [n for n, v in quality.items() if v == v and v < 1.0]
@@ -779,7 +779,7 @@ else:
                 xanchor="right", x=1,
             ),
         )
-        st.plotly_chart(fig_timeline, use_container_width=True)
+        st.plotly_chart(fig_timeline, width="stretch")
 
         if walk_forward is not None:
             spacing = walk_forward["spacing_days"]
@@ -887,7 +887,7 @@ else:
             ),
             hovermode="x unified",
         )
-        st.plotly_chart(fig_h, use_container_width=True)
+        st.plotly_chart(fig_h, width="stretch")
 
         n_pos = int(frame["n_positive"].max())
         st.caption(
@@ -908,17 +908,39 @@ else:
     # ==================================================================
     # 6c. Relative forward-volatility outlook
     # ==================================================================
-    # Deliberately a percentile, not a forecast. The factors rank future
-    # volatility consistently (IC positive in all 15 fold-horizon
-    # combinations measured) but predict its *level* weakly, and the one
-    # fold that is negative at every horizon is 2006-2016 — the model
-    # ranks 2008 correctly and still misses its magnitude. A number in
-    # large type here would be least reliable exactly when it mattered.
+    # Shown only when its own measurement supports it.
+    #
+    # This panel was built when the factors appeared to rank forward
+    # volatility with an out-of-sample IC of +0.16, positive in every
+    # fold. That came from a DFM whose EM diverged on long windows; on the
+    # rebuilt panel the same specification measures +0.009. The caption
+    # here used to hard-code the old evidence — "IC positive in all 15
+    # fold-horizon combinations", the 2008 fold — and all of it became
+    # false the moment the panel was rebuilt, while the gauge carried on
+    # rendering a colour-coded percentile of what is now noise.
+    #
+    # So the claim is no longer written down. The outlook measures itself
+    # on load and `has_usable_signal` decides whether a reading appears.
     st.subheader("Forward Volatility Outlook (relative)")
 
     outlook, vol_message = load_volatility_outlook(horizon=3)
     if outlook is None:
         st.caption(vol_message)
+    elif not outlook.has_usable_signal:
+        st.info(
+            f"**No usable signal on the current panel** — "
+            f"{outlook.evidence_summary}. The latent factors do not rank "
+            f"forward volatility well enough to show a reading, so none "
+            f"is shown. A percentile computed anyway would look like "
+            f"information and carry none."
+        )
+        st.caption(
+            ":grey[An earlier panel measured +0.16 here, but it was built "
+            "by a factor model whose estimation diverged on long windows. "
+            "The gate is measured on load, so a rebuilt panel that restores "
+            "the signal will bring this reading back without a code "
+            "change.]"
+        )
     else:
         try:
             live_factors = factors.rename(
@@ -951,14 +973,7 @@ else:
                     f"own history — <b>{band}</b></div>",
                     unsafe_allow_html=True,
                 )
-                ic_text = (
-                    f"{outlook.oos_ic:+.3f}" if outlook.oos_ic is not None
-                    else "not measurable"
-                )
-                st.caption(
-                    f"Out-of-sample IC {ic_text} over {outlook.oos_folds} "
-                    f"purged folds, {outlook.horizon}-month horizon."
-                )
+                st.caption(outlook.evidence_summary.capitalize() + ".")
 
             with vcol2:
                 hist = outlook.history.dropna()
@@ -979,7 +994,7 @@ else:
                     yaxis=dict(title="months"),
                     plot_bgcolor="white",
                 )
-                st.plotly_chart(fig_v, use_container_width=True)
+                st.plotly_chart(fig_v, width="stretch")
 
             n_comp = assessment["n_comparable"]
             if n_comp:
@@ -990,15 +1005,12 @@ else:
                     f"{assessment['realised_p25']:.1%} and "
                     f"{assessment['realised_p75']:.1%} (median "
                     f"{assessment['realised_median']:.1%}). That spread is the "
-                    f"honest magnitude — the model ranks periods far better "
-                    f"than it sizes them, so it is shown as a range of "
-                    f"outcomes rather than a forecast."
+                    f"honest magnitude, so it is shown as a range of outcomes "
+                    f"rather than a forecast."
                 )
             st.caption(
-                ":grey[Ranking only. Out-of-sample R² is +0.02 to +0.06 across "
-                "3/6/12-month horizons, and the one fold negative at every "
-                "horizon spans 2008 — the level is least reliable in a crisis, "
-                "which is when it would matter most. Do not trade the number.]"
+                ":grey[Ranking only — a percentile against this model's own "
+                "history, not a volatility forecast. Do not trade the number.]"
             )
 
     st.markdown("---")
@@ -1065,7 +1077,7 @@ else:
         if isinstance(regime_probs, pd.DataFrame) and len(regime_probs) > 0:
             st.dataframe(
                 regime_probs.tail(24).style.format("{:.1%}"),
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.info("No regime probabilities to display")
@@ -1074,7 +1086,7 @@ else:
         if isinstance(factors, pd.DataFrame) and len(factors) > 0:
             st.dataframe(
                 factors.tail(24).style.format("{:.3f}"),
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.info("No factor data to display")
@@ -1085,7 +1097,7 @@ else:
             alloc_ts = allocator.get_allocation_dataframe(regime_probs.tail(24))
             st.dataframe(
                 alloc_ts.style.format("{:.1%}"),
-                use_container_width=True,
+                width="stretch",
             )
 
     # ------------------------------------------------------------------

@@ -20,6 +20,7 @@ import pytest
 
 from src.models.volatility_outlook import (
     MIN_OBSERVATIONS,
+    MIN_USABLE_IC,
     VolatilityOutlook,
     realised_forward_volatility,
 )
@@ -51,6 +52,7 @@ def outlook() -> VolatilityOutlook:
         factor_columns=list(_FACTORS),
         oos_ic=0.16,
         oos_folds=5,
+        oos_fold_ics=[0.10, 0.29, 0.19, 0.14, 0.16],
     )
 
 
@@ -154,3 +156,81 @@ def test_realised_volatility_is_forward_looking():
 def test_minimum_observations_is_enforced_not_advisory():
     """A percentile drawn from a handful of points is not a percentile."""
     assert MIN_OBSERVATIONS >= 60
+
+
+
+# ---------------------------------------------------------------------------
+# The panel must not show a reading its own evidence does not support
+# ---------------------------------------------------------------------------
+
+
+def _with_evidence(outlook: VolatilityOutlook, fold_ics: list[float]):
+    """A copy of *outlook* carrying a different out-of-sample measurement."""
+    from dataclasses import replace
+
+    return replace(
+        outlook,
+        oos_ic=float(np.mean(fold_ics)),
+        oos_folds=len(fold_ics),
+        oos_fold_ics=list(fold_ics),
+    )
+
+
+def test_the_panel_that_justified_building_this_passes(outlook):
+    """The pre-rebuild evidence: +0.157 mean, positive in every fold."""
+    assert outlook.has_usable_signal
+
+
+def test_the_rebuilt_panel_is_refused(outlook):
+    """Measured on the rebuilt panel: +0.009 mean, mixed signs.
+
+    This is the case that made the gate necessary. The dashboard kept
+    rendering a colour-coded percentile after the evidence behind it had
+    gone to zero, under a caption still quoting the old numbers.
+    """
+    rebuilt = _with_evidence(outlook, [-0.09, 0.05, 0.02, 0.04, 0.03])
+    assert rebuilt.oos_ic < MIN_USABLE_IC
+    assert not rebuilt.has_usable_signal
+
+
+def test_a_strong_mean_carried_by_one_fold_is_refused(outlook):
+    """Sign consistency across eras was the claim, not the average.
+
+    The momentum-inclusive benchmark set reaches +0.08 at three months
+    while inverting in 1976-86 — a mean that one era can carry.
+    """
+    lopsided = _with_evidence(outlook, [-0.25, -0.06, 0.29, 0.30, 0.25])
+    assert lopsided.oos_ic >= MIN_USABLE_IC, "precondition: the mean clears"
+    assert not lopsided.has_usable_signal
+
+
+def test_one_weak_fold_is_tolerated(outlook):
+    """One negative fold in five is not a reason to hide a real signal."""
+    one_miss = _with_evidence(outlook, [-0.02, 0.20, 0.18, 0.15, 0.16])
+    assert one_miss.has_usable_signal
+
+
+def test_unmeasured_evidence_is_refused(outlook):
+    """No measurement is not a pass."""
+    from dataclasses import replace
+
+    blank = replace(outlook, oos_ic=None, oos_folds=0, oos_fold_ics=[])
+    assert not blank.has_usable_signal
+
+
+def test_the_dashboard_no_longer_hard_codes_the_evidence():
+    """The caption quoted numbers that went stale when the panel changed."""
+    from pathlib import Path
+
+    app = (
+        Path(__file__).resolve().parents[1] / "src" / "dashboard" / "app.py"
+    ).read_text(encoding="utf-8")
+    code = "\n".join(
+        ln for ln in app.splitlines() if not ln.lstrip().startswith("#")
+    )
+    for stale in ("+0.02 to +0.06", "all 15 fold", "spans 2008"):
+        assert stale not in code, (
+            f"the dashboard hard-codes volatility evidence ({stale!r}); "
+            f"it must come from the outlook's own measurement"
+        )
+    assert "has_usable_signal" in code, "the panel is not gated on evidence"
