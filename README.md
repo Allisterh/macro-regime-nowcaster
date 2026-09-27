@@ -43,6 +43,7 @@ and [Is It Useful Downstream?](#is-it-useful-downstream)
 | Discrimination vs CFNAI | **+0.070 AUC, P = 0.98** (CI excludes zero, narrowly) |
 | Calibration vs CFNAI | **27% better, P = 1.00** (CI excludes zero) |
 | Forecasting 12 months out | AUC 0.660 — modest, but ahead of CFNAI's 0.634 |
+| Against professional forecasters (SPF) | **ahead** in every scenario, though not significantly; blending the two adds nothing |
 | Predicting forward equity returns | **no skill** (negative R² everywhere) |
 | Predicting forward volatility | **no reliable skill** — IC +0.01 on the factor levels; the wider set reaches +0.08 but only after 1996 |
 | Predicting forward drawdown | **no skill** (negative R² everywhere) |
@@ -98,28 +99,6 @@ The live values are `Nowcaster.DEFAULT_WEIGHTS`; per-horizon overrides are in
 Five interpretable factors extracted via PCA + EM + varimax rotation. Names are assigned by *loading evidence* rather than column position — varimax does not preserve ordering — and signs are fixed by a loading-sum convention so the factor orientation is reproducible across runs:
 
 ![Latent Factors](docs/images/latent_factors.png)
-
-### Forward Volatility Outlook (relative)
-
-**Currently shows no reading, on purpose.** On the rebuilt panel it displays:
-
-> **No usable signal on the current panel** — out-of-sample IC +0.009,
-> positive in 3 of 5 purged folds, 3-month horizon.
-
-This panel was built when the latent factors appeared to rank forward NASDAQ
-volatility with an out-of-sample IC of +0.157, positive in every fold. That
-panel came from a factor model whose EM diverged on long windows. Rebuilt with
-the EM fixed, the same specification measures +0.009, −0.010 and +0.031 at 3,
-6 and 12 months: nothing.
-
-So the panel measures its own evidence on load and shows a reading only when
-the out-of-sample IC reaches 0.05 *and* is positive in at least four of five
-folds — sign consistency was what the original claim rested on, and a mean can
-be carried by one era. When the gate passes, it reports a **percentile** against
-the model's own history, never a level, and gives magnitude as the empirical
-spread of what volatility did in comparable months. Nothing about the evidence
-is written into the code any more; the previous caption was, and every word of
-it went stale when the panel was rebuilt.
 
 ### Historical Regime Classification
 
@@ -580,6 +559,87 @@ The dashboard plots these with block-bootstrap bands. The per-horizon gaps
 beyond 0m are not individually significant, and the bands overlap. At eighteen
 months nothing here is distinguishable from CFNAI or from chance.
 
+### Does it beat the professionals?
+
+CFNAI is a free index; a sterner benchmark is what professional forecasters
+said at the time. The Philadelphia Fed's
+[Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/recess)
+has asked every quarter since 1968Q4 for the probability that real GDP falls in
+the survey quarter (`RECESS1`) and the next (`RECESS2`, the Anxious Index). It
+is a consensus probability recorded in real time — what prediction markets
+offer, with the 55 years of history they lack, covering all eight recessions.
+
+**Point-in-time alignment is the whole game.** Each row is scored with the
+latest survey *published* by that row's reference month-end — the model's own
+information cutoff, since the walk-forward masks every input against it — using
+the Philadelphia Fed's release dates. The 1990Q2 survey, for instance, was taken
+retroactively in August 1990; treating it as known in May would hand it the
+start of the July 1990 recession. Surveys before 1990Q2 have no published
+release date, so results are shown under three assumed lags from the start of
+the survey quarter — 45 days (modern practice; post-1990 surveys publish a
+median 45 days in), 90 and 120 — plus the post-1990 sample where every date is
+known.
+
+The questions were fixed before any result was seen, and nothing else was
+searched over: SPF alone against the ensemble, and a fixed, untuned 50/50
+average of the two against the ensemble.
+
+| | SPF − ensemble, AUC | 50/50 blend − ensemble, AUC | blend − ensemble, Brier |
+|---|---|---|---|
+| lag 45d (optimistic) | −0.020 [−0.062, +0.044] | +0.005 [−0.011, +0.036] | −0.005 [−0.025, +0.009] |
+| lag 90d (central) | −0.036 [−0.088, +0.027] | +0.001 [−0.015, +0.028] | −0.003 [−0.022, +0.012] |
+| lag 120d (conservative) | −0.050 [−0.116, +0.019] | −0.002 [−0.020, +0.024] | −0.002 [−0.020, +0.014] |
+| post-1990 only | −0.052 [−0.153, +0.030] | −0.010 [−0.041, +0.024] | **+0.007 [+0.003, +0.024]** |
+
+**The model is ahead of the professionals.** Not significantly — every interval
+on SPF-versus-ensemble includes zero — but consistently: the point estimate
+favours the model in every scenario, and increasingly so as the SPF is denied
+hindsight about its unknown early release dates. On the post-1990 sample, where
+every date is known, the ensemble scores 0.948 and the SPF 0.896.
+
+**Blending them adds nothing, and after 1990 it hurts.** The AUC change is
+about 0.01 or less in every scenario, with every interval spanning zero. On the post-1990 sample the blend is
+*significantly worse calibrated* than the ensemble alone — the one interval in
+the table that excludes zero points the wrong way. The SPF was therefore **not
+added to the model**.
+
+| Horizon | Ensemble | SPF RECESS1 | SPF RECESS2 | Blend |
+|---|---|---|---|---|
+| 0m | **0.938** | 0.902 | 0.910 | **0.938** |
+| 3m | 0.882 | 0.817 | 0.853 | **0.884** |
+| 6m | **0.801** | 0.694 | 0.746 | **0.801** |
+| 9m | **0.720** | 0.567 | 0.643 | 0.719 |
+| 12m | **0.674** | 0.460 | 0.560 | 0.649 |
+| 18m | **0.589** | 0.352 | 0.458 | 0.539 |
+
+The model beats both SPF readings at every horizon. The blend matches it to
+within 0.002 out to six months and falls behind beyond that. The SPF's
+current-quarter reading drops below chance from twelve months out — high
+recession odds *now* predict a recovery later, not a recession.
+
+**This section first reported the opposite, and the difference is instructive.**
+The first version aligned the SPF to each row's `knowable_at` — the reference
+month plus 60 days — on the belief that this was the model's cutoff. It is not:
+it is a conservative buffer for joining *downstream* targets. Because surveys
+publish about 45 days into each quarter, those extra 60 days routinely handed
+the SPF the *next* survey, and the result was a 50/50 blend that appeared to
+add +0.025 AUC with an interval excluding zero, and an SPF that appeared to tie
+the model. The error surfaced when the SPF was about to be built into the
+model, on the strength of that result. Correctly aligned, the gain is +0.001.
+`tests/test_spf.py` now fails if a benchmark row can see a survey published
+after its reference month.
+
+One expectation stated before the first run also turns out to have been right
+after all: that the SPF's standalone Brier would lose, because it prices a
+quarter of falling GDP rather than an NBER recession month. The misaligned run
+appeared to contradict it; correctly aligned, the SPF scores 0.0825 against the
+ensemble's 0.0715.
+
+```bash
+pip install -e ".[benchmarks]"   # openpyxl, for the SPF .xlsx files
+python scripts/measure_spf.py     # downloads the SPF files on first run
+```
+
 ### Caveats that bound every number above
 
 **Eight episodes is still a small sample.** Doubling it from four reversed
@@ -661,9 +721,8 @@ It also splits by era. Across the three horizons, every fold after 1996 has a
 positive IC and the 1976-86 fold is *inverted* at all three (−0.25, −0.23,
 −0.19). A relationship that holds for thirty years and reverses in the ten
 before is not one to trade on, and five folds cannot say whether it is a
-genuine shift or noise that happens to look good lately. The dashboard's
-volatility panel, which uses the five factor levels without the momentum
-columns, measures +0.009.
+genuine shift or noise that happens to look good lately. The five factor levels
+on their own, without the momentum columns, measure +0.009.
 
 **This reverses what this section reported until September 2026**: IC +0.16,
 positive in all 15 fold-horizon combinations, the basis for building the
@@ -679,11 +738,41 @@ An earlier one (IC +0.40 on 1990–2026) disappeared when the sample was extende
 to 1967. Both were reported with the evidence that seemed to support them at
 the time, and both were wrong.
 
-One unverified lead, noted rather than claimed: the four regime signals under
-the GBM reach a volatility IC of +0.14 / +0.19 / +0.20 at 3 / 6 / 12 months,
-with negative R² throughout. That is the same shape the retracted factor result
-had, and it has not been through the per-fold, per-era check that result
-failed. Do not treat it as a finding until it has.
+**A third candidate was tested and not established.** The four regime signals
+under the GBM reach a volatility IC of +0.14 / +0.19 / +0.20 at 3 / 6 / 12
+months. `scripts/scrutinise_signal.py` put it through the checks the retracted
+result failed, plus a null distribution built by circularly shifting the target:
+
+| regime signals → fwd vol (GBM) | 3m | 6m | 12m |
+|---|---|---|---|
+| mean IC | +0.143 | +0.187 | +0.200 |
+| folds positive | 4 of 5 | 4 of 5 | 4 of 5 |
+| ridge on the same features | −0.021 | −0.017 | −0.014 |
+| null 95th percentile | +0.144 | +0.185 | +0.170 |
+| share of null draws ≥ observed | 0.06 | 0.05 | 0.05 |
+
+It is better behaved than the retracted result — positive in both eras, and
+robust across every GBM depth and tree count tried. But it sits exactly at the
+edge of its own null, the null's maximum exceeds it at every horizon, the linear
+model finds nothing, and the one negative fold is 2016-2026 at all three
+horizons — the decade that matters for using it now. It was also noticed as the
+best-looking volatility cell among about thirty, and p ≈ 0.05 on the best of
+thirty is what chance produces.
+
+**Read every IC in this section against that null.** On this sample — five
+purged folds of about 700 autocorrelated monthly observations — circularly
+shifted noise routinely reaches an IC of +0.15 to +0.20, and single draws
++0.25. The test itself was validated on synthetic data: it detects a planted
+effect of IC ~0.4 or more every time, and is borderline at IC ~0.2 (p = 0.07,
+0.00 and 0.05 on three seeds). So the honest reading of the regime-signal result
+is not "noise" but *below what this data can resolve*, and the same applies to
+any IC here under about 0.2.
+
+```bash
+python scripts/scrutinise_signal.py                           # this test
+python scripts/scrutinise_signal.py --features p_recession \
+    --target fwd_drawdown --model ridge                       # any other
+```
 
 **Wide feature sets still lose.** The full 35-column panel is worst on
 volatility (R² −4.03) and drawdown (−0.28). On returns the factor-only set is
@@ -694,8 +783,9 @@ terms, and a wide fit against a handful of recessions is mostly variance.
 
 - **Directional prediction: no.** Nothing in this repository supports it.
 - **Volatility: no.** An apparent ranking signal was retracted when the factor
-  model was fixed. What remains is weak, era-dependent, and absent from the
-  five factor levels.
+  model was fixed, and the best remaining candidate sits at the edge of its own
+  null distribution. Nothing here has shown volatility skill this sample can
+  distinguish from chance.
 - **Drawdown: no**, despite a +0.15 IC on `p_recession` — the R² is negative, so
   the ordering carries some information the magnitude does not support.
 - **Regime state as a conditioner or interaction term** remains the most
@@ -735,7 +825,7 @@ ones it produces now.
 | **The EM diverged on panels spanning 2020**, producing NaN loadings; the failure surfaced only later inside varimax's SVD as "SVD did not converge" | 40 of 710 walk-forward windows died, every one in 2020 or later — so the failures clustered on exactly the dates a live dashboard asks about | The EM stops on divergence and keeps the last good estimate; varimax refuses non-finite input; the Kalman filter's `pinv` retries with ridge regularisation |
 | **The divergence guard above tested `np.isfinite` only** — and overflow reaches ~1e300 while staying perfectly finite, so `last_good` kept absorbing already-diverged iterates. The "last finite estimate" it fell back to had an `R` so large the Kalman gain underflowed to zero, leaving every state at its zero initialisation | 808 months of factors all exactly `0.0`, with finite parameters, the right shape and no error. 30 of 716 walk-forward windows. The guard written to turn a crash into a graceful fallback turned it into a silent fabrication instead | `_params_are_sane` requires parameters to be finite **and** O(1)-scaled; on a standardised panel every parameter is order unity. `fit()` also raises if all factors have zero variance, so a degenerate fit fails in the estimator rather than four layers downstream |
 | **Both guards above treated the symptom. The EM itself was not a correct EM, and nothing pinned the factor scale.** Traced per iteration on the 832-month panel: `Q` rose 1.1 → 62 → 4.2e4 → 1.1e6 while the idiosyncratic variances collapsed toward zero, and `max|A|` reached 51 with its eigenvalues pinned at 0.99 — drift along a non-orthogonal similarity transform, which a state-space model is only identified up to. The `Q` M-step was also missing its `A·P_{t-1}·A'` term, so it was not the maximiser and EM's monotonicity guarantee did not hold | The guard stopped the EM at iteration ~32 and kept an under-converged fit in which **two of five factors carried no loadings** (max loading 0.2% of the panel's largest, 0.0% of variance). Everything downstream was computed from it — including AUC 0.951 and the volatility result below — and the match-quality ratio could not see the empty factors, scoring one of them 1.13 "evidenced" | `C` is orthonormalised each iteration (`C = USV'`, `M = SV'`), which removes the unidentified directions exactly — observation and lag-1 covariance are preserved, verified. `Q` uses the true M-step. Idiosyncratic variance is floored at 1%, because `TERM_SPREAD` and `CREDIT_SPREAD` sit in the panel beside all four of their components and can otherwise be fitted exactly. The EM now converges on every window: 0 divergences in 716, against 30+ before. A scale-aware `_factor_strength` sits beside the ratio, and the RSM refuses an empty factor |
-| **The volatility result was an artefact of the diverging EM, and the dashboard shipped a panel on it.** The factors appeared to rank forward NASDAQ volatility with out-of-sample IC +0.16, positive in all 15 fold-horizon combinations | A dashboard panel was built on that result, with a caption hard-coding the evidence. Rebuilt with the EM fixed, the same specification measures +0.009 / −0.010 / +0.031 at 3 / 6 / 12 months; the wider benchmark set keeps a weak, era-dependent +0.08. The caption stayed confidently wrong, and the gauge kept rendering a colour-coded percentile of noise | Retracted here and in [Is It Useful Downstream?](#is-it-useful-downstream). The panel now measures its own evidence on load and shows a reading only if out-of-sample IC ≥ 0.05 **and** positive in at least four of five folds; on the current panel it shows why it has nothing to say. No evidence is written into the code — the last caption was, and all of it went stale at once |
+| **The volatility result was an artefact of the diverging EM, and the dashboard shipped a panel on it.** The factors appeared to rank forward NASDAQ volatility with out-of-sample IC +0.16, positive in all 15 fold-horizon combinations | A dashboard panel was built on that result, with a caption hard-coding the evidence. Rebuilt with the EM fixed, the same specification measures +0.009 / −0.010 / +0.031 at 3 / 6 / 12 months; the wider benchmark set keeps a weak, era-dependent +0.08. The caption stayed confidently wrong, and the gauge kept rendering a colour-coded percentile of noise | Retracted here and in [Is It Useful Downstream?](#is-it-useful-downstream). The panel was first gated on its own measured evidence, then **removed**: the best remaining candidate (regime signals under a GBM) sat at the edge of a circular-shift null distribution, below what this sample can resolve, and a section that permanently reports "no usable signal" implies there might be one. `scripts/scrutinise_signal.py` — per-fold, per-era, cross-estimator and null-distribution checks, itself validated on planted signals — is what any future candidate has to pass first |
 | **There was no inflation factor, and two rates factors had no name.** At K=4 the price series loaded at 0.01-0.17 on every factor. The match-quality metric compared anchors to a factor's *average* loading, which flatters a low-magnitude factor — "inflation" scored 1.81 on a factor whose top loadings were BAA, the regional-Fed surveys and `CREDIT_SPREAD` | With no names for the yield-curve and long-rates factors, whichever label was left over absorbed them — which is how `labor_market` became a yield-curve factor in the first place | Quality is measured against the 90th-percentile loading, not the average; `yield_curve` and `long_rates` are named and anchored; the default is K=5. **The fifth factor is now `credit_premium`, not `inflation`.** With the EM fixed, the panel supports five factors (contributions 49 / 19 / 14 / 11 / 8%, no empty ones), but the one labelled inflation never was: it correlated +0.37 with CPI year-on-year against +0.61 for `long_rates`, its top loadings were `AAA10Y`, `BAA10Y`, `DFF` and `T10Y2Y`, and the CPI anchors reached only 0.12 on it. It is anchored on the corporate-over-Treasury spreads it actually measures and scores 1.59. Inflation is not missing from the model — it is in `long_rates`, where nominal yields should carry it. All five factors now clear the evidence threshold, and `yield_curve` rose 1.72 → 2.20 once the rate *levels* `DFF` and `TB3MS` were dropped from its slope anchors |
 | **A factor's *name* was trusted where the loadings did not support it.** `labor_market` was assigned to a factor whose strongest loadings were BAA, AAA and GS10 — bond yields — and the regime model was fitted on it by name. Anchor sets also overlapped (`PAYEMS` served two names), making the assignment ill-posed and the tie-break arbitrary | The recession probability tracked the level of interest rates: the RSM read 99.9% while every other signal was calm | Anchor sets are disjoint; the DFM reports a match-quality score per name and warns when one is not evidenced; the RSM selects factors by that score rather than by label. RSM went 0.999 → 0.003 and saturation 90% → 2% |
 | **Three of four signals reported the 0.5 fallback as if it were a reading.** Publication lags mask the last month or two of every series — by design — but the ensemble read `.iloc[-1]`, saw NaN and fell back to 0.5. Separately, `max_column_missing` of 0.9 kept the *quarterly* `DRTSCILM` in a monthly panel, where it is 67% missing, and requiring it non-NaN then dropped two rows in three and emptied the probit's training set | The dashboard showed "Probit 50.0%", indistinguishable from a genuine coin-flip reading, and the headline probability averaged fill values with real ones | Signals use the latest *published* observation and report its date; the headline is computed from those point estimates so it cannot disagree with the breakdown beside it; the column threshold is 0.5 and the quarterly feature is gone |

@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from src.evaluation.horizon_curve import _label_blocks, horizon_auc_curve
+from src.evaluation.paired_bootstrap import paired_block_bootstrap
 from src.models.regime_backtest import (
     brier_score,
     get_nber_recession_indicator,
@@ -92,29 +93,16 @@ def main() -> int:
     # interval reflects how few independent episodes there are.
     ens, cf = scores["p_recession"], scores["signal_cfnai"]
     blocks = _label_blocks(pd.Series(y, index=common))
-    rng = np.random.default_rng(args.seed)
-    d_auc, d_brier = [], []
-    for _ in range(args.n_boot):
-        pick = rng.integers(0, len(blocks), len(blocks))
-        idx = np.concatenate([blocks[i] for i in pick])
-        yb = y[idx]
-        if yb.min() == yb.max():
-            continue
-        a = roc_auc(yb, ens[idx]) - roc_auc(yb, cf[idx])
-        if np.isfinite(a):
-            d_auc.append(a)
-        d_brier.append(brier_score(yb, ens[idx]) - brier_score(yb, cf[idx]))
-
-    point_auc = roc_auc(y, ens) - roc_auc(y, cf)
-    point_brier = brier_score(y, ens) - brier_score(y, cf)
-    lo_a, hi_a = np.percentile(d_auc, [2.5, 97.5])
-    lo_b, hi_b = np.percentile(d_brier, [2.5, 97.5])
-    print(f"Ensemble vs CFNAI  ({len(blocks)} blocks, {len(d_auc)} draws)")
-    print(f"  AUC   {point_auc:+.3f}  95% CI [{lo_a:+.3f}, {hi_a:+.3f}]  "
-          f"P(>0) = {np.mean(np.array(d_auc) > 0):.2f}")
-    print(f"  Brier {point_brier:+.4f}  95% CI [{lo_b:+.4f}, {hi_b:+.4f}]  "
-          f"P(<0) = {np.mean(np.array(d_brier) < 0):.2f}")
-    print(f"  Brier improvement: {-point_brier / brier_score(y, cf):.1%}")
+    auc = paired_block_bootstrap(y, ens, cf, blocks, roc_auc,
+                                 n_boot=args.n_boot, seed=args.seed)
+    brier = paired_block_bootstrap(y, ens, cf, blocks, brier_score,
+                                   n_boot=args.n_boot, seed=args.seed)
+    print(f"Ensemble vs CFNAI  ({len(blocks)} blocks, {auc.draws} draws)")
+    print(f"  AUC   {auc.point:+.3f}  95% CI [{auc.lo:+.3f}, {auc.hi:+.3f}]  "
+          f"P(>0) = {auc.p_positive:.2f}")
+    print(f"  Brier {brier.point:+.4f}  95% CI [{brier.lo:+.4f}, {brier.hi:+.4f}]  "
+          f"P(<0) = {brier.p_negative:.2f}")
+    print(f"  Brier improvement: {-brier.point / brier_score(y, cf):.1%}")
     print()
 
     curve = horizon_auc_curve(
