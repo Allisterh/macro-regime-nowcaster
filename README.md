@@ -679,11 +679,41 @@ An earlier one (IC +0.40 on 1990–2026) disappeared when the sample was extende
 to 1967. Both were reported with the evidence that seemed to support them at
 the time, and both were wrong.
 
-One unverified lead, noted rather than claimed: the four regime signals under
-the GBM reach a volatility IC of +0.14 / +0.19 / +0.20 at 3 / 6 / 12 months,
-with negative R² throughout. That is the same shape the retracted factor result
-had, and it has not been through the per-fold, per-era check that result
-failed. Do not treat it as a finding until it has.
+**A third candidate was tested and not established.** The four regime signals
+under the GBM reach a volatility IC of +0.14 / +0.19 / +0.20 at 3 / 6 / 12
+months. `scripts/scrutinise_signal.py` put it through the checks the retracted
+result failed, plus a null distribution built by circularly shifting the target:
+
+| regime signals → fwd vol (GBM) | 3m | 6m | 12m |
+|---|---|---|---|
+| mean IC | +0.143 | +0.187 | +0.200 |
+| folds positive | 4 of 5 | 4 of 5 | 4 of 5 |
+| ridge on the same features | −0.021 | −0.017 | −0.014 |
+| null 95th percentile | +0.144 | +0.185 | +0.170 |
+| share of null draws ≥ observed | 0.06 | 0.05 | 0.05 |
+
+It is better behaved than the retracted result — positive in both eras, and
+robust across every GBM depth and tree count tried. But it sits exactly at the
+edge of its own null, the null's maximum exceeds it at every horizon, the linear
+model finds nothing, and the one negative fold is 2016-2026 at all three
+horizons — the decade that matters for using it now. It was also noticed as the
+best-looking volatility cell among about thirty, and p ≈ 0.05 on the best of
+thirty is what chance produces.
+
+**Read every IC in this section against that null.** On this sample — five
+purged folds of about 700 autocorrelated monthly observations — circularly
+shifted noise routinely reaches an IC of +0.15 to +0.20, and single draws
++0.25. The test itself was validated on synthetic data: it detects a planted
+effect of IC ~0.4 or more every time, and is borderline at IC ~0.2 (p = 0.07,
+0.00 and 0.05 on three seeds). So the honest reading of the regime-signal result
+is not "noise" but *below what this data can resolve*, and the same applies to
+any IC here under about 0.2.
+
+```bash
+python scripts/scrutinise_signal.py                           # this test
+python scripts/scrutinise_signal.py --features p_recession \
+    --target fwd_drawdown --model ridge                       # any other
+```
 
 **Wide feature sets still lose.** The full 35-column panel is worst on
 volatility (R² −4.03) and drawdown (−0.28). On returns the factor-only set is
@@ -694,8 +724,9 @@ terms, and a wide fit against a handful of recessions is mostly variance.
 
 - **Directional prediction: no.** Nothing in this repository supports it.
 - **Volatility: no.** An apparent ranking signal was retracted when the factor
-  model was fixed. What remains is weak, era-dependent, and absent from the
-  five factor levels.
+  model was fixed, and the best remaining candidate sits at the edge of its own
+  null distribution. Nothing here has shown volatility skill this sample can
+  distinguish from chance.
 - **Drawdown: no**, despite a +0.15 IC on `p_recession` — the R² is negative, so
   the ordering carries some information the magnitude does not support.
 - **Regime state as a conditioner or interaction term** remains the most
