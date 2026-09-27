@@ -43,6 +43,7 @@ and [Is It Useful Downstream?](#is-it-useful-downstream)
 | Discrimination vs CFNAI | **+0.070 AUC, P = 0.98** (CI excludes zero, narrowly) |
 | Calibration vs CFNAI | **27% better, P = 1.00** (CI excludes zero) |
 | Forecasting 12 months out | AUC 0.660 — modest, but ahead of CFNAI's 0.634 |
+| Against professional forecasters (SPF) | **a statistical tie** — and averaging the two adds **+0.02 to +0.03 AUC**, CI excluding zero |
 | Predicting forward equity returns | **no skill** (negative R² everywhere) |
 | Predicting forward volatility | **no reliable skill** — IC +0.01 on the factor levels; the wider set reaches +0.08 but only after 1996 |
 | Predicting forward drawdown | **no skill** (negative R² everywhere) |
@@ -557,6 +558,83 @@ It leads CFNAI at every horizon out to a year, but not beyond:
 The dashboard plots these with block-bootstrap bands. The per-horizon gaps
 beyond 0m are not individually significant, and the bands overlap. At eighteen
 months nothing here is distinguishable from CFNAI or from chance.
+
+### Does it beat the professionals?
+
+CFNAI is a free index; a sterner benchmark is what professional forecasters
+said at the time. The Philadelphia Fed's
+[Survey of Professional Forecasters](https://www.philadelphiafed.org/surveys-and-data/recess)
+has asked every quarter since 1968Q4 for the probability that real GDP falls in
+the survey quarter (`RECESS1`) and the next (`RECESS2`, the Anxious Index). It
+is a consensus probability recorded in real time — what prediction markets
+offer, with the 55 years of history they lack, covering all eight recessions.
+
+**Point-in-time alignment is the whole game.** Each row is scored with the
+latest survey *published* by that row's `knowable_at`, the same cutoff as the
+model, using the Philadelphia Fed's own release dates. That matters: the 1990Q2
+survey was taken retroactively in August 1990, so treating it as known in May
+would hand it the start of the July 1990 recession. Surveys before 1990Q2 have
+no published release date, so results are shown under three assumed lags from
+the start of the survey quarter — 45 days (modern practice; post-1990 surveys
+publish a median 45 days in), 90 and 120 — plus the post-1990 sample where every
+date is known.
+
+The questions were fixed before any result was seen, and nothing else was
+searched over: SPF alone against the ensemble, and a fixed, untuned 50/50
+average of the two against the ensemble.
+
+| | SPF − ensemble, AUC | 50/50 blend − ensemble, AUC | blend − ensemble, Brier |
+|---|---|---|---|
+| lag 45d (optimistic) | +0.016 [−0.020, +0.085] | **+0.028 [+0.005, +0.079]** | **−0.015 [−0.039, −0.002]** |
+| lag 90d (central) | +0.009 [−0.028, +0.076] | **+0.025 [+0.003, +0.073]** | **−0.013 [−0.037, −0.001]** |
+| lag 120d (conservative) | −0.000 [−0.040, +0.065] | **+0.020 [+0.001, +0.061]** | −0.011 [−0.030, +0.002] |
+| post-1990 only | −0.004 [−0.064, +0.110] | +0.018 [−0.002, +0.112] | −0.003 [−0.013, +0.005] |
+
+**The model ties the professionals.** Every interval on SPF-versus-ensemble
+straddles zero. The SPF's edge also shrinks steadily as it is denied hindsight
+about its unknown early release dates — +0.016, +0.009, −0.000 — which is the
+signature of look-ahead, not skill; with every date known, post-1990, the
+ensemble is fractionally ahead.
+
+**Combining them helps, modestly.** The blend beats the ensemble in every
+scenario, and its AUC gain excludes zero under all three timing assumptions. It
+also beats *both* of its parts (central: 0.963 against 0.947 for the SPF and
+0.938 for the ensemble), which is what complementary information looks like, as
+opposed to one signal simply being the better one. Read it carefully all the
+same: the gain shrinks as the early lag grows, the Brier improvement loses
+significance under the conservative lag, and the post-1990 sample alone — four
+recessions rather than eight — is too short to confirm it, although its point
+estimate agrees.
+
+**By horizon, they divide the work.**
+
+| Horizon | Ensemble | SPF RECESS1 | SPF RECESS2 | Blend |
+|---|---|---|---|---|
+| 0m | 0.938 | 0.947 | 0.937 | **0.963** |
+| 3m | 0.881 | 0.890 | 0.904 | **0.908** |
+| 6m | 0.800 | 0.784 | 0.825 | **0.829** |
+| 9m | 0.719 | 0.662 | 0.722 | **0.744** |
+| 12m | **0.673** | 0.540 | 0.617 | 0.668 |
+| 18m | **0.592** | 0.365 | 0.509 | 0.545 |
+
+The SPF helps out to nine months; beyond that the model is better, and the
+current-quarter reading turns actively misleading — 0.365 at eighteen months,
+below chance, because high recession odds *now* predict a recovery a year and a
+half out.
+
+One expectation written into the script beforehand was **wrong**: that the SPF's
+standalone Brier would lose, since it prices a quarter of falling GDP rather
+than an NBER recession month. Over the full sample it wins (0.062 against
+0.072); only post-1990 does the ensemble come out ahead.
+
+The SPF is **not yet part of the model** — whether to add it, and at what weight,
+is a separate decision. The 50/50 weight was fixed in advance precisely so this
+result would not be a tuned one; choosing a better weight would need its own
+out-of-sample selection.
+
+```bash
+python scripts/measure_spf.py      # downloads the SPF files on first run
+```
 
 ### Caveats that bound every number above
 

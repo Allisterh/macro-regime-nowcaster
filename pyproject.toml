@@ -38,6 +38,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "requests>=2.31",
     "duckdb>=0.9",
+    "openpyxl>=3.1",  # reads the Philadelphia Fed SPF .xlsx files
     "loguru>=0.7",
 ]
 
