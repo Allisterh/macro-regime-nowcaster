@@ -636,7 +636,8 @@ appeared to contradict it; correctly aligned, the SPF scores 0.0825 against the
 ensemble's 0.0715.
 
 ```bash
-python scripts/measure_spf.py      # downloads the SPF files on first run
+pip install -e ".[benchmarks]"   # openpyxl, for the SPF .xlsx files
+python scripts/measure_spf.py     # downloads the SPF files on first run
 ```
 
 ### Caveats that bound every number above

@@ -38,7 +38,6 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "requests>=2.31",
     "duckdb>=0.9",
-    "openpyxl>=3.1",  # reads the Philadelphia Fed SPF .xlsx files
     "loguru>=0.7",
 ]
 
@@ -50,6 +49,11 @@ dev = [
     "black>=23.0",
     "mypy>=1.6",
     "pre-commit>=3.5",
+]
+benchmarks = [
+    # scripts/measure_spf.py reads the Philadelphia Fed SPF .xlsx files.
+    # Not a runtime dependency: the SPF was benchmarked and not added.
+    "openpyxl>=3.1",
 ]
 bayesian = [
     "pymc>=5.0",
