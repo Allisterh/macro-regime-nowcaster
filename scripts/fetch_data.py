@@ -79,12 +79,18 @@ def main() -> int:
     cache_dir = settings.get("data", {}).get("cache_dir", "data/cache")
     db_path = settings.get("data", {}).get("database_path", "data/nowcaster.duckdb")
 
+    import pandas as pd
+
     from src.data.data_pipeline import DataPipeline
-    from src.data.fred_client import FREDClient
+    from src.data.fred_client import DEFAULT_MAX_AGE, FREDClient
     from src.data.storage import DataStorage
 
     logger.info("Initialising FRED client")
-    client = FREDClient(api_key=api_key, cache_dir=cache_dir)
+    # --no-cache used to be parsed and then never read, so it did nothing
+    # and there was no supported way to refresh the cache. A max_age of
+    # zero now re-fetches every series and rewrites its cache file.
+    max_age = pd.Timedelta(0) if args.no_cache else DEFAULT_MAX_AGE
+    client = FREDClient(api_key=api_key, cache_dir=cache_dir, max_age=max_age)
 
     try:
         storage = DataStorage(db_path=db_path)

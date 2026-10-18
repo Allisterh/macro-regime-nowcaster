@@ -36,19 +36,24 @@ def test_get_series_as_of_requests_a_single_vintage():
     try:
         from src.data.fred_client import FREDClient
         client = FREDClient(api_key="test_key", cache_dir=None)
-        client.get_series(
+        out = client.get_series(
             "PAYEMS",
-            start_date="2020-01-01",
-            end_date="2020-12-31",
+            start_date="2020-03-01",
+            end_date="2020-08-31",
             as_of="2020-06-15",
             use_cache=False,
         )
         call_kwargs = mock_inst.get_series.call_args
         assert call_kwargs.kwargs.get("realtime_end") == "2020-06-15"
         assert call_kwargs.kwargs.get("realtime_start") == "2020-06-15"
-        # Observation bounds are unaffected by the vintage request.
-        assert call_kwargs.kwargs.get("observation_start") == "2020-01-01"
-        assert call_kwargs.kwargs.get("observation_end") == "2020-12-31"
+        # The full history is fetched (and would be cached), and the
+        # requested window is applied locally. This used to assert the
+        # observation bounds were passed to FRED — which is what let a
+        # cached file hold only the range its last caller asked for.
+        assert call_kwargs.kwargs.get("observation_start") is None
+        assert call_kwargs.kwargs.get("observation_end") is None
+        assert out.index.min() >= pd.Timestamp("2020-03-01")
+        assert out.index.max() <= pd.Timestamp("2020-08-31")
     finally:
         ctx.stop()
 
