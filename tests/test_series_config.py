@@ -8,7 +8,12 @@ missing an entire survey block with nothing to signal it.
 
 These tests are offline: they check the structure and internal
 consistency of the catalogue.  Validating the ids against the live API
-needs a key, so that check is opt-in via ``--runlive``.
+needs a key, so that check is marked ``live`` and skips unless
+``FRED_API_KEY`` is set in the *shell* environment — pytest does not read
+``.env``. (This used to say "opt-in via ``--runlive``", an option that was
+never registered.) To run just it::
+
+    FRED_API_KEY=... pytest tests/test_series_config.py -m live
 """
 
 from __future__ import annotations
