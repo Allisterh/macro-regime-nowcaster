@@ -54,7 +54,13 @@ def align_mixed_frequency(
     if not frames:
         return pd.DataFrame()
 
-    panel = pd.concat(frames, axis=1)
+    # Series start on different dates, so the union index needs sorting.
+    # pandas 3 sorts it by default but warns that pandas 4 will not; say
+    # so explicitly rather than lean on a default that is changing. The
+    # sort_index below is the actual guarantee — everything downstream
+    # (the Kalman filter, shift, diff, iloc[-1] as "latest") assumes time
+    # order.
+    panel = pd.concat(frames, axis=1, sort=True)
     panel.sort_index(inplace=True)
     return panel
 

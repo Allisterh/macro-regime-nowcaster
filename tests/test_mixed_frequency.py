@@ -80,6 +80,42 @@ def test_align_mixed_frequencies_join():
 # ---------------------------------------------------------------------------
 
 
+def test_series_starting_on_different_dates_give_a_time_ordered_panel():
+    """The real panel joins series with different histories.
+
+    The other tests here give every series the same dates, so the union
+    index never needed sorting and pandas never warned. On real data it
+    does: pandas 3 warns that pandas 4 will stop sorting the union of
+    DatetimeIndexes in ``concat``. That warning surfaced only when the
+    model was run on a new machine, never in this suite. Listing the
+    later-starting series *first* is what makes the union need sorting;
+    with ``sort`` left implicit, this test fails under the project's
+    filter that turns deprecations triggered from ``src`` into errors.
+    """
+    late = pd.Series(
+        np.arange(24, dtype=float),
+        index=pd.date_range("2010-01-31", periods=24, freq="ME"),
+    )
+    early = pd.Series(
+        np.arange(60, dtype=float),
+        index=pd.date_range("2005-01-31", periods=60, freq="ME"),
+    )
+    raw = {"LATE": late, "EARLY": early}
+    cfg = [
+        {"code": "LATE", "frequency": "monthly"},
+        {"code": "EARLY", "frequency": "monthly"},
+    ]
+
+    panel = align_mixed_frequency(raw, cfg)
+
+    assert panel.index.is_monotonic_increasing, (
+        "the panel is not in time order; the Kalman filter, shift, diff and "
+        "iloc[-1] would all silently read the wrong observation"
+    )
+    assert panel.index[0] == pd.Timestamp("2005-01-31")
+    assert panel["LATE"].first_valid_index() == pd.Timestamp("2010-01-31")
+
+
 def test_cumulator_augments_state_dim():
     """With quarterly columns present, state dim should be K + 2K."""
     result = build_cumulator_matrices(

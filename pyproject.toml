@@ -72,7 +72,16 @@ include = ["src*", "scripts*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
-filterwarnings = ["ignore::DeprecationWarning"]
+# Third-party libraries' internal deprecations stay quiet, but a
+# deprecation triggered by *this project's* code is a test failure. The
+# blanket ignore used to hide pandas' own Pandas4Warning — a
+# DeprecationWarning subclass — so a pandas-4 breaking change in
+# src/data/mixed_frequency.py surfaced only when run on real data, never
+# in the suite or in CI. Later filters take precedence.
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "error::DeprecationWarning:src",
+]
 markers = [
     "slow: repeatedly refits the DFM/RSM (minutes, not seconds). Run the fast suite with `-m 'not slow'`.",
     "live: hits the FRED API. Skipped automatically when FRED_API_KEY is unset.",

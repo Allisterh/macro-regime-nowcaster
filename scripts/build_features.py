@@ -71,6 +71,21 @@ def parse_args() -> argparse.Namespace:
             "short panel at two cutoffs and asserts the overlap is identical."
         ),
     )
+    parser.add_argument(
+        "--cache-dir",
+        default="data/cache",
+        help="FRED cache to read. Point it at a snapshot under "
+             "data/snapshots/ to rebuild from frozen data.",
+    )
+    parser.add_argument(
+        "--no-refresh",
+        action="store_true",
+        help=(
+            "Use the cache exactly as it is. By default a fresh run "
+            "refreshes every series once, then pins the cache for the whole "
+            "run; a resumed run pins without refreshing."
+        ),
+    )
     parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
 
@@ -105,7 +120,34 @@ def main() -> int:
     ).strftime("%Y-%m-%d")
     logger.info(f"Data pipeline starts {pipeline_start} (as-of from {args.start})")
 
-    client = FREDClient(api_key=api_key, cache_dir="data/cache")
+    # Every window of a walk-forward must see the same data. The run reads
+    # the FRED cache hundreds of times over several hours, so it is pinned
+    # (never expires) for the duration. A fresh run refreshes every series
+    # once first, so the panel is built on current data; a *resumed* run
+    # does not, because refreshing mid-panel would splice two snapshots
+    # into one table — rows before the interruption on the old data, rows
+    # after on the new — and the partial-file check cannot tell them apart.
+    partial = Path(args.output).with_suffix(".partial.csv")
+    resuming = partial.exists()
+    refresh = not (args.no_refresh or args.verify or args.vintages or resuming)
+    if refresh:
+        logger.info(f"Refreshing every series in {args.cache_dir} before the run")
+        DataPipeline(
+            fred_client=FREDClient(
+                api_key=api_key, cache_dir=args.cache_dir,
+                max_age=pd.Timedelta(0),
+            ),
+            start_date=pipeline_start,
+            series_config_path="config/fred_series.yaml",
+        ).run()
+    elif resuming:
+        logger.info(
+            f"Resuming from {partial}: pinning {args.cache_dir} as it is, so "
+            f"the rest of the panel uses the same data as the rows already "
+            f"built. Delete the partial file to rebuild on fresh data."
+        )
+
+    client = FREDClient(api_key=api_key, cache_dir=args.cache_dir, max_age=None)
     pipeline = DataPipeline(
         fred_client=client,
         start_date=pipeline_start,
